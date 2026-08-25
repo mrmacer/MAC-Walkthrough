@@ -100,6 +100,44 @@ const GRAPH = {
     return items;
   },
 
+  // PACE visits accumulate beyond Microsoft Graph's default page size. Keep
+  // the existing one-page reader stable for current callers, and use this
+  // explicit all-pages reader for administrative history/analytics.
+  async getAllListItems(listName) {
+    const siteId = await this.getSiteId();
+    const listId = await this.getListId(listName);
+    let path = `sites/${siteId}/lists/${listId}/items?$expand=fields&$top=200`;
+    let items = [];
+    while (path) {
+      const data = await this._get(path);
+      items = items.concat(data.value || []);
+      const nextLink = data["@odata.nextLink"];
+      path = nextLink ? nextLink.replace(`${this._BASE}/`, "") : null;
+    }
+    return items.map(item => ({ id: item.id, ...item.fields }));
+  },
+
+  // Normalize internal SharePoint field keys back to display names. PACE's
+  // read model uses only these stable display names and never guesses an
+  // internal column name.
+  async getListItemsByDisplayName(listName, allPages = false) {
+    const [items, schema] = await Promise.all([
+      allPages ? this.getAllListItems(listName) : this.getListItems(listName),
+      this.getListSchema(listName)
+    ]);
+    const displayByInternal = {};
+    Object.entries(schema).forEach(([displayName, internalName]) => {
+      displayByInternal[internalName] = displayName;
+    });
+    return items.map(item => {
+      const row = { id: item.id };
+      Object.entries(item).forEach(([key, value]) => {
+        if (key !== "id") row[displayByInternal[key] || key] = value;
+      });
+      return row;
+    });
+  },
+
   async findListItemByDisplayField(listName, displayFieldName, value) {
     const [items, schema] = await Promise.all([
       this.getListItems(listName),

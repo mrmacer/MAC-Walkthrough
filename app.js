@@ -366,7 +366,7 @@ const AVAILABLE_TEACHERS = PILOT_TEACHERS
   .filter(t => TEACHER_IDENTITIES[t.id])
   .map(t => TEACHER_IDENTITIES[t.id]);
 
-const TEACHER_ALLOWED_ROUTES = new Set(["pulse", "pace"]);
+const TEACHER_ALLOWED_ROUTES = new Set(["pulse"]);
 
 const USER_CONTEXT = {
   actualUser:    null,
@@ -1456,7 +1456,7 @@ const APP = {
       walkthrough:      () => this.renderWalkthrough(),
       v2walkthrough:    () => this.renderWalkthroughV2(),
       pulse:            () => this.renderPulse(),
-      pace:             () => this.renderPaceLog(),
+      pace:             () => this.renderPaceAdmin(),
       checkin:          () => this.renderStudentCheckIn(),
       dashboard:        () => this.renderDashboard(),
       reports:          () => this.renderReports(),
@@ -3148,7 +3148,207 @@ const APP = {
 
   _paceScmUsed: null,
 
-  renderPaceLog() {
+  async renderPaceAdmin(forceRefresh = false) {
+    const el = document.getElementById("page-pace");
+
+    // Navigation authorization already blocks teacher deep links. Keep a
+    // second check at the renderer boundary so PACE student history never
+    // becomes accessible through a direct method call or stale hash state.
+    if (!AUTH.isAdmin || USER_CONTEXT.isViewingAsTeacher) {
+      el.innerHTML = `<div class="page-header"><h2>PACE Log</h2></div>
+        <div class="warning-banner">Administrator access is required to view PACE analytics and history.</div>`;
+      return;
+    }
+
+    el.innerHTML = `<div class="walk-page-header">
+        <h2 class="walk-page-title">PACE Log</h2>
+        <p class="walk-page-sub">Completed visit history from IEP_Pace_Visits.</p>
+      </div>
+      <div class="card pace-admin-loading"><div class="reports-loading"><span class="spinner"></span> Loading PACE visits from SharePoint…</div></div>`;
+
+    try {
+      if (forceRefresh) PACE_ADMIN.invalidate();
+      const data = await PACE_ADMIN.load(forceRefresh);
+      if (this.currentPage !== "pace") return;
+      this._paceAdminData = data;
+
+      const values = key => [...new Set(data.visits.flatMap(v => Array.isArray(v[key]) ? v[key] : [v[key]]).filter(Boolean))]
+        .sort((a, b) => a.localeCompare(b));
+      const students    = values("student");
+      const specialists = values("specialist");
+      const teachers    = values("teacherCameFrom");
+      const rooms       = values("paceRoom");
+      const reasons     = values("reasons");
+      const optionHtml = (items, label) => `<option value="">${escHtml(label)}</option>${items.map(item =>
+        `<option value="${escHtml(item)}">${escHtml(item)}</option>`).join("")}`;
+
+      const today = new Date().toISOString().slice(0, 10);
+      const start = new Date(`${today}T12:00:00`);
+      start.setDate(start.getDate() - 29);
+      const from = start.toISOString().slice(0, 10);
+      const missing = [
+        ["PACE Room", data.availability.paceRoom],
+        ["SCM Used", data.availability.scm],
+        ["Teacher Came From", data.availability.teacherCameFrom]
+      ].filter(([, available]) => !available).map(([name]) => name);
+
+      el.innerHTML = `
+        <div class="walk-page-header pace-admin-header">
+          <div>
+            <h2 class="walk-page-title">PACE Log</h2>
+            <p class="walk-page-sub">Investigate completed PACE visits from the authoritative SharePoint list.</p>
+          </div>
+          <button class="btn btn-secondary btn-sm" id="paceAdminRefresh">↻ Refresh from SharePoint</button>
+        </div>
+
+        <div class="info-banner" style="margin-bottom:16px">
+          <svg viewBox="0 0 20 20" fill="currentColor" width="18" height="18" style="flex-shrink:0"><path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clip-rule="evenodd"/></svg>
+          <div>PACE Room Tracker records visits; this administrator view is read-only. Select a student name to review individual history.</div>
+        </div>
+
+        ${missing.length ? `<div class="pace-schema-note"><strong>Schema-aware view:</strong> ${escHtml(missing.join(", "))} ${missing.length === 1 ? "is" : "are"} not available in the current list, so related filters and statistics are hidden.</div>` : ""}
+
+        <div class="filter-bar pace-filter-bar">
+          <div class="pace-filter-heading"><div class="card-title">Filters</div><button class="btn btn-secondary btn-sm" id="paceClearFilters">Clear</button></div>
+          <div class="filter-row pace-filter-grid">
+            <div class="form-field"><label class="form-label" for="pf-from">From</label><input class="form-input" type="date" id="pf-from" value="${from}"></div>
+            <div class="form-field"><label class="form-label" for="pf-to">To</label><input class="form-input" type="date" id="pf-to" value="${today}"></div>
+            <div class="form-field"><label class="form-label" for="pf-student">Student</label><select class="form-select" id="pf-student">${optionHtml(students, "All Students")}</select></div>
+            ${specialists.length ? `<div class="form-field"><label class="form-label" for="pf-specialist">Behavior Specialist</label><select class="form-select" id="pf-specialist">${optionHtml(specialists, "All Specialists")}</select></div>` : ""}
+            ${teachers.length && data.availability.teacherCameFrom ? `<div class="form-field"><label class="form-label" for="pf-teacher">Teacher Came From</label><select class="form-select" id="pf-teacher">${optionHtml(teachers, "All Teachers")}</select></div>` : ""}
+            ${rooms.length && data.availability.paceRoom ? `<div class="form-field"><label class="form-label" for="pf-room">PACE Room</label><select class="form-select" id="pf-room">${optionHtml(rooms, "All Rooms")}</select></div>` : ""}
+            ${reasons.length ? `<div class="form-field"><label class="form-label" for="pf-reason">Reason</label><select class="form-select" id="pf-reason">${optionHtml(reasons, "All Reasons")}</select></div>` : ""}
+            ${data.availability.scm ? `<div class="form-field"><label class="form-label" for="pf-scm">SCM</label><select class="form-select" id="pf-scm"><option value="">All</option><option value="yes">Used</option><option value="no">Not Used</option></select></div>` : ""}
+            ${data.visits.some(v => v.durationMinutes !== null) ? `<div class="form-field"><label class="form-label" for="pf-duration">Duration</label><select class="form-select" id="pf-duration"><option value="">Any Duration</option><option value="under-45">Under 45 minutes</option><option value="45-plus">45+ minutes</option></select></div>` : ""}
+            <div class="form-field pace-search-field"><label class="form-label" for="pf-search">Search</label><input class="form-input" type="search" id="pf-search" placeholder="Search student, reason, support, or notes…"></div>
+          </div>
+        </div>
+
+        <div id="paceAdminResults"></div>
+
+        <div id="pace-history-modal" class="report-modal hidden" role="dialog" aria-modal="true" aria-labelledby="pace-history-title">
+          <div class="report-modal-backdrop" id="pace-history-backdrop"></div>
+          <div class="report-modal-panel pace-history-panel">
+            <div class="report-modal-header"><h3 class="report-modal-title" id="pace-history-title">Student PACE History</h3><button class="report-modal-close" id="pace-history-close" aria-label="Close">✕</button></div>
+            <div class="report-modal-body" id="pace-history-body"></div>
+          </div>
+        </div>`;
+
+      const apply = () => this._renderPaceAdminResults();
+      el.querySelectorAll("#pf-from,#pf-to,#pf-student,#pf-specialist,#pf-teacher,#pf-room,#pf-reason,#pf-scm,#pf-duration")
+        .forEach(input => input.addEventListener("change", apply));
+      el.querySelector("#pf-search")?.addEventListener("input", apply);
+      el.querySelector("#paceClearFilters").addEventListener("click", () => {
+        el.querySelectorAll(".pace-filter-bar input,.pace-filter-bar select").forEach(input => { input.value = ""; });
+        apply();
+      });
+      el.querySelector("#paceAdminRefresh").addEventListener("click", () => this.renderPaceAdmin(true));
+      const closeHistory = () => el.querySelector("#pace-history-modal")?.classList.add("hidden");
+      el.querySelector("#pace-history-close").addEventListener("click", closeHistory);
+      el.querySelector("#pace-history-backdrop").addEventListener("click", closeHistory);
+      apply();
+    } catch (err) {
+      console.error("PACE administrator read failed:", err.message || String(err));
+      el.innerHTML = `<div class="walk-page-header"><h2 class="walk-page-title">PACE Log</h2><p class="walk-page-sub">Completed visit history from IEP_Pace_Visits.</p></div>
+        <div class="reports-error"><strong>PACE visits could not be loaded from SharePoint.</strong><p>${escHtml(err.message || String(err))}</p><button class="btn btn-secondary btn-sm" id="paceRetryLoad">Try Again</button></div>`;
+      el.querySelector("#paceRetryLoad")?.addEventListener("click", () => this.renderPaceAdmin(true));
+    }
+  },
+
+  _getPaceAdminFilters() {
+    const value = id => document.getElementById(id)?.value || "";
+    return {
+      from: value("pf-from"), to: value("pf-to"), student: value("pf-student"),
+      specialist: value("pf-specialist"), teacherCameFrom: value("pf-teacher"),
+      paceRoom: value("pf-room"), reason: value("pf-reason"), scm: value("pf-scm"),
+      duration: value("pf-duration"), search: value("pf-search")
+    };
+  },
+
+  _renderPaceAdminResults() {
+    const container = document.getElementById("paceAdminResults");
+    if (!container || !this._paceAdminData) return;
+    const filtered = PACE_ADMIN.filterVisits(this._paceAdminData.visits, this._getPaceAdminFilters())
+      .sort(PACE_ADMIN.sortNewest);
+    const completed = filtered.filter(v => v.isCompleted);
+    const summary = PACE_ADMIN.summarize(filtered);
+    const shown = filtered.slice(0, 200);
+    const roomLabel = room => ({ "pace-room-1": "PACE Room 1", "pace-room-2": "PACE Room 2" }[room] || room || "—");
+    const showSpecialist = this._paceAdminData.availability.specialist && this._paceAdminData.visits.some(v => v.specialist);
+    const showTeacher    = this._paceAdminData.availability.teacherCameFrom && this._paceAdminData.visits.some(v => v.teacherCameFrom);
+    const showRoom       = this._paceAdminData.availability.paceRoom && this._paceAdminData.visits.some(v => v.paceRoom);
+    const showScm        = this._paceAdminData.availability.scm && this._paceAdminData.visits.some(v => v.scmUsed !== null);
+
+    container.innerHTML = `
+      <div class="pace-results-summary">
+        <div><strong>${filtered.length}</strong> record${filtered.length !== 1 ? "s" : ""}</div>
+        <div><strong>${summary.uniqueStudents}</strong> student${summary.uniqueStudents !== 1 ? "s" : ""}</div>
+        ${summary.averageDuration !== null ? `<div><strong>${summary.averageDuration} min</strong> average</div>` : ""}
+        ${filtered.length !== completed.length ? `<div class="pace-legacy-count">${filtered.length - completed.length} older/incomplete</div>` : ""}
+      </div>
+      ${shown.length === 0 ? `<div class="card"><div class="empty-state"><div class="empty-icon">🔎</div><p>No PACE visits match these filters.</p></div></div>` : `
+        <div class="card pace-results-card">
+          <div class="table-wrap"><table class="reports-table pace-admin-table"><thead><tr>
+            <th>Date / Time</th><th>Student</th><th>Duration</th><th>Reason / Support</th>
+            ${showSpecialist ? "<th>Specialist</th>" : ""}
+            ${showTeacher ? "<th>Teacher Came From</th>" : ""}
+            ${showRoom ? "<th>Room</th>" : ""}
+            ${showScm ? "<th>SCM</th>" : ""}
+          </tr></thead><tbody>${shown.map(visit => `<tr>
+            <td><strong>${visit.date ? escHtml(fmtDate(visit.date + "T12:00:00")) : "—"}</strong><div class="pace-cell-sub">${escHtml(visit.timeIn || "—")} → ${escHtml(visit.timeOut || "—")}</div></td>
+            <td>${visit.student ? `<button class="pace-student-link" data-student="${escHtml(visit.student)}">${escHtml(visit.student)}</button>` : "—"}${!visit.isCompleted ? `<div><span class="pace-record-badge">Older / incomplete</span></div>` : ""}</td>
+            <td>${visit.durationMinutes !== null ? `${visit.durationMinutes} min` : "—"}</td>
+            <td><div class="pace-tag-row">${visit.reasons.map(reason => `<span class="pace-tag">${escHtml(reason)}</span>`).join("")}</div>${visit.supports.length ? `<div class="pace-cell-sub">Support: ${escHtml(visit.supports.join(", "))}</div>` : ""}${visit.notes ? `<details class="pace-notes"><summary>Notes</summary><p>${escHtml(visit.notes)}</p></details>` : ""}</td>
+            ${showSpecialist ? `<td>${escHtml(visit.specialist || "—")}</td>` : ""}
+            ${showTeacher ? `<td>${escHtml(visit.teacherCameFrom || "—")}</td>` : ""}
+            ${showRoom ? `<td>${escHtml(roomLabel(visit.paceRoom))}</td>` : ""}
+            ${showScm ? `<td>${visit.scmUsed === null ? "—" : visit.scmUsed ? `<span class="badge badge-red">Yes</span>` : "No"}</td>` : ""}
+          </tr>`).join("")}</tbody></table></div>
+          ${filtered.length > shown.length ? `<p class="pace-result-limit">Showing the newest ${shown.length} of ${filtered.length} matching records. Narrow the filters to investigate further.</p>` : ""}
+        </div>`}`;
+
+    container.querySelectorAll(".pace-student-link").forEach(button =>
+      button.addEventListener("click", () => this._openPaceStudentHistory(button.dataset.student))
+    );
+  },
+
+  _openPaceStudentHistory(student) {
+    if (!AUTH.isAdmin || USER_CONTEXT.isViewingAsTeacher || !this._paceAdminData) return;
+    const modal = document.getElementById("pace-history-modal");
+    const body  = document.getElementById("pace-history-body");
+    if (!modal || !body) return;
+    const today = new Date().toISOString().slice(0, 10);
+    const history = PACE_ADMIN.studentHistory(this._paceAdminData.visits, student, today);
+    const a = {
+      ...this._paceAdminData.availability,
+      specialist: this._paceAdminData.availability.specialist && history.recentVisits.some(v => v.specialist)
+    };
+    const metric = (label, value) => `<div class="stat-card"><div class="stat-label">${escHtml(label)}</div><div class="stat-value">${escHtml(value)}</div></div>`;
+
+    body.innerHTML = `
+      <div class="pace-history-heading"><h3>${escHtml(student)}</h3><p>Last 30 days · ${escHtml(fmtDate(history.from + "T12:00:00"))}–${escHtml(fmtDate(history.to + "T12:00:00"))}</p></div>
+      <div class="stat-grid pace-history-stats">
+        ${metric("PACE Visits", history.visits)}
+        ${history.totalMinutes !== null ? metric("Total PACE Time", `${history.totalMinutes} min`) : ""}
+        ${history.averageDuration !== null ? metric("Average Visit", `${history.averageDuration} min`) : ""}
+        ${a.scm && history.scmEvents !== null ? metric("SCM Events", history.scmEvents) : ""}
+        ${a.reason && history.needsBreak !== null ? metric("Needs a Break", history.needsBreak) : ""}
+      </div>
+      <div class="pace-history-highlights">
+        ${history.mostCommonReason ? `<div><span>Most Common Reason</span><strong>${escHtml(history.mostCommonReason[0])}</strong></div>` : ""}
+        ${a.teacherCameFrom && history.mostCommonTeacher ? `<div><span>Most Common Teacher Came From</span><strong>${escHtml(history.mostCommonTeacher[0])}</strong></div>` : ""}
+      </div>
+      <h4 class="pace-history-recent-title">Recent Visits</h4>
+      ${history.recentVisits.length ? `<div class="table-wrap"><table class="reports-table"><thead><tr><th>Date</th><th>Duration</th><th>Reason</th>${a.specialist ? "<th>Specialist</th>" : ""}</tr></thead><tbody>
+        ${history.recentVisits.map(visit => `<tr><td>${visit.date ? escHtml(fmtDate(visit.date + "T12:00:00")) : "—"}<div class="pace-cell-sub">${escHtml(visit.timeIn)} → ${escHtml(visit.timeOut)}</div></td><td>${visit.durationMinutes !== null ? visit.durationMinutes + " min" : "—"}</td><td>${escHtml(visit.reasons.join(", ") || "—")}</td>${a.specialist ? `<td>${escHtml(visit.specialist || "—")}</td>` : ""}</tr>`).join("")}
+      </tbody></table></div>` : `<div class="empty-state"><p>No completed visits in this period.</p></div>`}`;
+    document.getElementById("pace-history-title").textContent = `${student} — PACE History`;
+    modal.classList.remove("hidden");
+  },
+
+  // Legacy operational form retained as an internal rollback path only. The
+  // PACE route now renders renderPaceAdmin(), and teachers cannot reach it.
+  _renderLegacyPaceLog() {
     const el = document.getElementById("page-pace");
 
     if (!STUDENT_ROSTER.loaded && !STUDENT_ROSTER.error) {
@@ -3533,7 +3733,7 @@ const APP = {
         confirmEl.className = "hidden";
         confirmEl.innerHTML = "";
         document.getElementById("contentArea").scrollTo({ top: 0, behavior: "smooth" });
-        this.renderPaceLog();
+        this._renderLegacyPaceLog();
       });
     } finally {
       this._paceInFlight = false;
@@ -3547,7 +3747,7 @@ const APP = {
     if (!updated) { showToast("Log not found.", "error"); return; }
     const durText = updated.durationMinutes !== null ? `${updated.durationMinutes} min` : "unknown";
     showToast(`Log closed. Duration: ${durText}`);
-    this.renderPaceLog();
+    this._renderLegacyPaceLog();
   },
 
   /* ── TEACHER DASHBOARD ───────────────────────────────────────────────────────── */
@@ -3876,9 +4076,13 @@ const APP = {
 
   async renderDashboard() {
     const el           = document.getElementById("page-dashboard");
+    if (!AUTH.isAdmin || USER_CONTEXT.isViewingAsTeacher) {
+      el.innerHTML = `<div class="page-header"><h2>Dashboard</h2></div>
+        <div class="warning-banner">Administrator access is required to view dashboard analytics.</div>`;
+      return;
+    }
     const records      = DB.getRecords();
     const pulses       = DB.getDailyPulses();
-    const paceLogs     = DB.getPaceLogs();
     const studentChecks = DB.getStudentChecks();
     const teachers     = DB.getTeachers();
     const classrooms   = DB.getClassrooms();
@@ -3894,10 +4098,9 @@ const APP = {
       return ps?.teacherId === user.id;
     });
     const filteredRecords = user.isAdmin ? records : records.filter(r => r.responses.teacherId === user.id);
-    const filteredPaceLogs = user.isAdmin ? paceLogs : paceLogs.filter(p => {
-      const ps = PILOT_STUDENTS.find(s => s.id === p.studentId);
-      return ps?.teacherId === user.id;
-    });
+    // PACE dashboard data is populated from IEP_Pace_Visits below. Never use
+    // the legacy local operational cache as an analytics source.
+    const filteredPaceLogs = [];
     const filteredChecks = user.isAdmin ? studentChecks : studentChecks.filter(c => {
       const ps = PILOT_STUDENTS.find(s => s.id === c.studentId);
       return ps?.teacherId === user.id;
@@ -3933,20 +4136,10 @@ const APP = {
     filteredPulses.forEach(p => { (p.categories||[]).forEach(c => { categoryCounts[c]=(categoryCounts[c]||0)+1; }); });
     const topCategory = Object.entries(categoryCounts).sort((a,b)=>b[1]-a[1])[0];
 
-    // ── PACE stats ──
-    const paceToday    = filteredPaceLogs.filter(p => p.date === today).length;
-    const paceOpen     = filteredPaceLogs.filter(p => p.isOpen).length;
-    const paceWithDur  = filteredPaceLogs.filter(p => p.durationMinutes !== null && p.durationMinutes >= 0);
-    const avgPaceDur   = paceWithDur.length > 0
-      ? Math.round(paceWithDur.reduce((s, p) => s + p.durationMinutes, 0) / paceWithDur.length)
-      : null;
+    // PACE analytics render asynchronously from SharePoint after the local
+    // dashboard shell; no PACE metric is derived from localStorage here.
     const paceBehaviorCounts = {};
-    filteredPaceLogs.forEach(p => { (p.behaviors||[]).forEach(b => { paceBehaviorCounts[b]=(paceBehaviorCounts[b]||0)+1; }); });
-    const topPaceBehavior = Object.entries(paceBehaviorCounts).sort((a,b)=>b[1]-a[1])[0];
-    const paceInterventionCounts = {};
-    filteredPaceLogs.forEach(p => { (p.interventions||[]).forEach(i => { paceInterventionCounts[i]=(paceInterventionCounts[i]||0)+1; }); });
-    const topPaceIntervention = Object.entries(paceInterventionCounts).sort((a,b)=>b[1]-a[1])[0];
-    const recentPaceLogs = [...filteredPaceLogs].sort((a,b)=>new Date(b.timestamp)-new Date(a.timestamp)).slice(0,10);
+    const topPaceIntervention = null;
 
     // ── Student Check-In stats ──
     const checkToday        = filteredChecks.filter(c => c.date === today);
@@ -4116,24 +4309,24 @@ const APP = {
 
       <div class="stat-grid">
         <div class="stat-card accent-orange">
-          <div class="stat-label">PACE Entries Today</div>
-          <div class="stat-value">${paceToday}</div>
-          <div class="stat-sub">Today's logged visits</div>
-        </div>
-        <div class="stat-card accent-red">
-          <div class="stat-label">Open PACE Logs</div>
-          <div class="stat-value">${paceOpen}</div>
-          <div class="stat-sub">${paceOpen > 0 ? "Time out not recorded" : "All logs closed"}</div>
-        </div>
-        <div class="stat-card accent-blue">
-          <div class="stat-label">Avg PACE Duration</div>
-          <div class="stat-value">${avgPaceDur !== null ? avgPaceDur + " min" : "—"}</div>
-          <div class="stat-sub">${paceWithDur.length > 0 ? paceWithDur.length + " closed log" + (paceWithDur.length !== 1 ? "s" : "") : "No closed logs yet"}</div>
+          <div class="stat-label">PACE Visits Today</div>
+          <div class="stat-value" id="d-pace-today">—</div>
+          <div class="stat-sub">Completed visits</div>
         </div>
         <div class="stat-card accent-green">
-          <div class="stat-label">Most Common Behavior</div>
-          <div class="stat-value stat-value-text">${topPaceBehavior ? escHtml(topPaceBehavior[0]) : "—"}</div>
-          <div class="stat-sub">${topPaceBehavior ? topPaceBehavior[1] + " log" + (topPaceBehavior[1] !== 1 ? "s" : "") : "No PACE entries yet"}</div>
+          <div class="stat-label">Students Seen Today</div>
+          <div class="stat-value" id="d-pace-students">—</div>
+          <div class="stat-sub">Unique students</div>
+        </div>
+        <div class="stat-card accent-blue">
+          <div class="stat-label">Average PACE Duration</div>
+          <div class="stat-value" id="d-pace-duration">—</div>
+          <div class="stat-sub">Completed visits · last 30 days</div>
+        </div>
+        <div class="stat-card accent-red">
+          <div class="stat-label" id="d-pace-fourth-label">PACE Activity</div>
+          <div class="stat-value stat-value-text" id="d-pace-fourth">—</div>
+          <div class="stat-sub" id="d-pace-fourth-sub">Last 30 days</div>
         </div>
       </div>
 
@@ -4237,27 +4430,9 @@ const APP = {
 
       <!-- PACE Room Activity -->
       <div class="card" style="margin-bottom:20px">
-        <div class="card-title">PACE Room Activity</div>
-        ${recentPaceLogs.length === 0
-          ? `<div class="empty-state"><div class="empty-icon">🚪</div><p>No PACE entries yet. <a href="#pace" style="color:var(--color-primary)">Log the first one.</a></p></div>`
-          : `<ul class="recent-list">${recentPaceLogs.map(p => {
-              const durText      = p.isOpen ? "still open" : (p.durationMinutes !== null ? `${p.durationMinutes} min` : "—");
-              const dotColor     = p.isOpen ? "#ea580c" : "#2563eb";
-              const paceRoomLbl  = p.paceRoom === "pace-room-1" ? "PACE Room 1" : "PACE Room 2";
-              const returnLbl    = CONFIG.PACE_RETURN_OPTIONS.find(o => o.value === p.returnStatus)?.label || p.returnStatus || "—";
-              const behaviorTags = (p.behaviors||[]).slice(0,3).map(b => `<span class="pace-tag">${escHtml(b)}</span>`).join("");
-              const moreCount    = (p.behaviors||[]).length - 3;
-              return `<li class="recent-item pace-activity-item">
-                <div class="recent-dot" style="background:${dotColor};flex-shrink:0"></div>
-                <div class="recent-meta" style="flex:1;min-width:0">
-                  <div class="recent-who">${escHtml(p.studentName)}${user.isAdmin && p.teacherName ? `<span class="trend-teacher"> — ${escHtml(p.teacherName)}</span>` : ""}</div>
-                  <div class="recent-when">${escHtml(paceRoomLbl)} · ${escHtml(p.timeIn)}${p.timeOut ? " → " + escHtml(p.timeOut) : ""} · ${escHtml(durText)}</div>
-                  ${behaviorTags ? `<div class="pace-tag-row">${behaviorTags}${moreCount > 0 ? `<span class="pace-tag pace-tag-more">+${moreCount} more</span>` : ""}</div>` : ""}
-                  <div style="font-size:11.5px;color:var(--text-muted);margin-top:2px">Return: ${escHtml(returnLbl)} · by ${escHtml(p.submittedByName || "—")}</div>
-                </div>
-                ${p.isOpen ? `<span class="pace-open-badge">OPEN</span>` : ""}
-              </li>`;
-            }).join("")}</ul>`}
+        <div class="card-title">PACE Activity <a href="#pace" class="pace-card-link">Explore visits →</a></div>
+        <div id="d-pace-flags"></div>
+        <div id="d-pace-activity"><div class="reports-loading"><span class="spinner"></span> Loading completed visits…</div></div>
       </div>
 
       <!-- Student Voice Check-Ins -->
@@ -4370,6 +4545,53 @@ const APP = {
           if (csub) csub.textContent = `${n} report${n !== 1 ? "s" : ""}`;
         }
 
+        // PACE administrator metrics and activity are always read from the
+        // shared IEP_Pace_Visits list. Missing optional columns change what
+        // is displayed rather than producing fabricated zeroes.
+        if (sp.pace) {
+          upd("d-pace-today", sp.pace.visitsToday);
+          upd("d-pace-students", sp.pace.studentsSeenToday);
+          upd("d-pace-duration", sp.pace.averageDuration !== null ? `${sp.pace.averageDuration} min` : "—");
+          const fourthLabel = document.getElementById("d-pace-fourth-label");
+          const fourthSub   = document.getElementById("d-pace-fourth-sub");
+          if (sp.pace.availability.scm && sp.pace.scmEvents !== null) {
+            if (fourthLabel) fourthLabel.textContent = "SCM Events";
+            upd("d-pace-fourth", sp.pace.scmEvents);
+            if (fourthSub) fourthSub.textContent = "Last 30 days";
+          } else {
+            if (fourthLabel) fourthLabel.textContent = "Most Common Reason";
+            upd("d-pace-fourth", sp.pace.mostCommonReason ? sp.pace.mostCommonReason[0] : "—");
+            if (fourthSub) fourthSub.textContent = sp.pace.mostCommonReason
+              ? `${sp.pace.mostCommonReason[1]} visit${sp.pace.mostCommonReason[1] !== 1 ? "s" : ""} · last 30 days`
+              : "No completed visits in this period";
+          }
+
+          const flagsEl = document.getElementById("d-pace-flags");
+          if (flagsEl) {
+            const flags = [];
+            if (sp.pace.flags.extendedVisits) flags.push(`${sp.pace.flags.extendedVisits} extended visit${sp.pace.flags.extendedVisits !== 1 ? "s" : ""} (45+ min)`);
+            if (sp.pace.flags.repeatVisitDays) flags.push(`${sp.pace.flags.repeatVisitDays} repeat-visit day${sp.pace.flags.repeatVisitDays !== 1 ? "s" : ""} (3+)`);
+            flagsEl.innerHTML = flags.length ? `<div class="pace-dashboard-flags">${flags.map(flag => `<span>${escHtml(flag)}</span>`).join("")}</div>` : "";
+          }
+
+          const activity = document.getElementById("d-pace-activity");
+          if (activity) {
+            activity.innerHTML = sp.pace.recentVisits.length === 0
+              ? `<div class="empty-state"><div class="empty-icon">🚪</div><p>No completed PACE visits in the last 30 days.</p></div>`
+              : `<ul class="recent-list">${sp.pace.recentVisits.map(visit => `<li class="recent-item pace-activity-item">
+                  <div class="recent-dot" style="background:#2563eb;flex-shrink:0"></div>
+                  <div class="recent-meta" style="flex:1;min-width:0">
+                    <div class="recent-who">${escHtml(visit.student || "Student not recorded")}</div>
+                    <div class="recent-when">${visit.date ? escHtml(fmtDate(visit.date + "T12:00:00")) : "—"} · ${escHtml(visit.timeIn || "—")} → ${escHtml(visit.timeOut || "—")}${visit.durationMinutes !== null ? ` · ${visit.durationMinutes} min` : ""}</div>
+                    ${visit.reasons.length ? `<div class="pace-tag-row">${visit.reasons.slice(0, 3).map(reason => `<span class="pace-tag">${escHtml(reason)}</span>`).join("")}</div>` : ""}
+                  </div>
+                </li>`).join("")}</ul>`;
+          }
+        } else {
+          const activity = document.getElementById("d-pace-activity");
+          if (activity) activity.innerHTML = `<div class="reports-error">PACE activity is temporarily unavailable from SharePoint.</div>`;
+        }
+
         // Most Common Classroom Status
         const statusList = document.getElementById("d-status-list");
         if (statusList) {
@@ -4434,10 +4656,10 @@ const APP = {
           badge.classList.remove("hidden");
         }
       } catch (e) {
-        console.warn("Dashboard SP refresh failed, showing local data:", e.message);
+        console.warn("Dashboard SharePoint refresh failed:", e.message);
         const badge = document.getElementById("d-live-badge");
         if (badge) {
-          badge.textContent = "Local data";
+          badge.textContent = "SharePoint unavailable";
           badge.style.color = "var(--text-muted)";
           badge.classList.remove("hidden");
         }

@@ -1,6 +1,6 @@
 // dashboard-sync.js — Live SharePoint stats for the dashboard
-// Walkthroughs + Daily Pulse come from SharePoint (fully synced).
-// PACE + Student Check-In come from localStorage (not yet synced to SP).
+// Walkthroughs, Daily Pulse, and PACE come from SharePoint.
+// Student Check-In remains localStorage-backed.
 
 const DashboardSync = {
   CACHE_MS: 90_000,
@@ -144,24 +144,14 @@ const DashboardSync = {
     };
   },
 
-  // PACE not yet synced to SharePoint — reads localStorage
-  loadPaceStats(user) {
-    const all   = DB.getPaceLogs();
-    const items = user.isAdmin ? all : all.filter(p => {
-      const ps = PILOT_STUDENTS.find(s => s.id === p.studentId);
-      return ps?.teacherId === user.id;
-    });
-    const today     = new Date().toISOString().slice(0, 10);
-    const paceToday = items.filter(p => p.date === today).length;
-    const paceOpen  = items.filter(p => p.isOpen).length;
-    const withDur   = items.filter(p => p.durationMinutes !== null && p.durationMinutes >= 0);
-    const avgDur    = withDur.length > 0
-      ? Math.round(withDur.reduce((s, p) => s + p.durationMinutes, 0) / withDur.length)
-      : null;
-    const bCounts = {};
-    items.forEach(p => { (p.behaviors || []).forEach(b => { bCounts[b] = (bCounts[b] || 0) + 1; }); });
-    const topBehavior = Object.entries(bCounts).sort((a, b) => b[1] - a[1])[0] || null;
-    return { paceToday, paceOpen, withDurCount: withDur.length, avgDur, topBehavior };
+  async loadPaceStats() {
+    const data = await PACE_ADMIN.load();
+    const today = new Date().toISOString().slice(0, 10);
+    return {
+      ...PACE_ADMIN.dashboardMetrics(data.visits, today),
+      availability: data.availability,
+      totalRecords: data.visits.length
+    };
   },
 
   // Student Check-In not yet synced to SharePoint — reads localStorage
@@ -186,8 +176,14 @@ const DashboardSync = {
       this.loadWalkthroughStats(user),
       this.loadDailyPulseStats(user)
     ]);
-    const pace     = this.loadPaceStats(user);
+    let pace = null;
+    let paceError = null;
+    try {
+      pace = await this.loadPaceStats();
+    } catch (err) {
+      paceError = err;
+    }
     const checkins = this.loadCheckinStats(user);
-    return { walk, pulse, pace, checkins };
+    return { walk, pulse, pace, paceError, checkins };
   }
 };
