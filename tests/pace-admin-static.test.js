@@ -55,10 +55,18 @@ assert.match(paceAdmin, /specialists:\s*list\(firstValue\(row, FIELD_ALIASES\.sp
 assert.match(paceAdmin, /function roomInfo\(/);
 
 // PACE Room + SCM surfaced patch
-assert.match(paceAdmin, /paceRoom:\s*\["PACE Room", "Pace Room", "paceRoom"\]/, "PACE Room aliases must use the confirmed display name");
 assert.match(paceAdmin, /scm:\s*\["SCM Used", "SCM", "scmUsed"\]/, "SCM aliases must use the confirmed display name");
 assert.match(paceAdmin, /"pace-room-1":\s*\{\s*label:\s*"PACE Room 1",\s*hallway:\s*"Yellow Hall"/);
 assert.match(paceAdmin, /"pace-room-2":\s*\{\s*label:\s*"PACE Room 2",\s*hallway:\s*"Green Hall"/);
+
+// PACE Room field-compatibility patch: "Room" is the confirmed-live display
+// name and must be tried first, ahead of the old speculative aliases.
+assert.match(paceAdmin, /paceRoom:\s*\["Room", "PACE Room", "Pace Room", "paceRoom"\]/,
+  "the confirmed live display name \"Room\" must be the first/highest-priority PACE Room alias");
+// roomInfo() must resolve the LABEL form ("PACE Room 1"), not only the
+// legacy internal slug — that's what production now actually writes.
+assert.match(paceAdmin, /ROOM_LOOKUP\[info\.label\.toLowerCase\(\)\] = info/,
+  "roomInfo() must index by the human-readable label PACE Room Tracker writes, not just the old slug");
 
 // Student-history detail panel shows Room + SCM alongside every other field
 assert.match(app, /field\("PACE Room"/);

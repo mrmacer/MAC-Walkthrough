@@ -175,6 +175,51 @@ assert.deepEqual(fullDetailVisit.reasons, ["Emotional Dysregulation", "Needs a B
 assert.deepEqual(fullDetailVisit.supports, ["Sensory Break", "Verbal Processing"]);
 assert.equal(fullDetailVisit.notes, "Full detail check.");
 
+// ── PATCH: recognize the confirmed-live "Room" display name ─────────────
+// (production SharePoint column is "Room", not "PACE Room" as previously
+// assumed — see pace-admin.js FIELD_ALIASES.paceRoom comment)
+
+const roomSchema = { ...confirmedSchema, Room: "Room_x0020_Field" };
+const roomAvailability = PACE_ADMIN.getAvailability(roomSchema);
+assert.equal(roomAvailability.paceRoom, true, "a live schema containing \"Room\" must be recognized — this was the actual bug");
+
+// Room = "PACE Room 1" (the confirmed-live value PACE Room Tracker writes)
+const room1LabelVisit = PACE_ADMIN.normalizeVisit({ Student: "Room Label 1", Date: "2026-08-27", Room: "PACE Room 1" });
+assert.equal(room1LabelVisit.paceRoom, "PACE Room 1");
+const room1LabelInfo = PACE_ADMIN.roomInfo(room1LabelVisit.paceRoom);
+assert.equal(room1LabelInfo.label, "PACE Room 1");
+assert.equal(room1LabelInfo.hallway, "Yellow Hall", "the live label value must resolve to a hallway, not just display as-is");
+
+// Room = "PACE Room 2"
+const room2LabelVisit = PACE_ADMIN.normalizeVisit({ Student: "Room Label 2", Date: "2026-08-27", Room: "PACE Room 2" });
+assert.equal(room2LabelVisit.paceRoom, "PACE Room 2");
+const room2LabelInfo = PACE_ADMIN.roomInfo(room2LabelVisit.paceRoom);
+assert.equal(room2LabelInfo.label, "PACE Room 2");
+assert.equal(room2LabelInfo.hallway, "Green Hall");
+
+// Legacy alias: a row still keyed "PACE Room" (not "Room") must still work
+const legacyAliasVisit = PACE_ADMIN.normalizeVisit({ Student: "Legacy Alias", Date: "2026-08-27", "PACE Room": "PACE Room 1" });
+assert.equal(legacyAliasVisit.paceRoom, "PACE Room 1");
+
+// Legacy/internal slug form ("pace-room-1") must still resolve to Yellow Hall
+const legacySlugVisit = PACE_ADMIN.normalizeVisit({ Student: "Legacy Slug", Date: "2026-08-27", Room: "pace-room-1" });
+assert.equal(legacySlugVisit.paceRoom, "pace-room-1");
+assert.equal(PACE_ADMIN.roomInfo(legacySlugVisit.paceRoom).hallway, "Yellow Hall");
+
+// "Room" takes priority when multiple room-ish keys are present on one row
+const priorityVisit = PACE_ADMIN.normalizeVisit({ Student: "Priority Check", Date: "2026-08-27", Room: "PACE Room 2", "PACE Room": "PACE Room 1" });
+assert.equal(priorityVisit.paceRoom, "PACE Room 2", "\"Room\" must win over the older \"PACE Room\" alias when both are present");
+
+// Missing room must never be fabricated
+const noRoomVisit = PACE_ADMIN.normalizeVisit({ Student: "No Room", Date: "2026-08-27" });
+assert.equal(noRoomVisit.paceRoom, "");
+assert.equal(PACE_ADMIN.roomInfo(noRoomVisit.paceRoom), null);
+
+// Room filter, using the confirmed-live "Room" field end to end
+const roomFilterVisits = [room1LabelVisit, room2LabelVisit];
+assert.deepEqual(PACE_ADMIN.filterVisits(roomFilterVisits, { paceRoom: "PACE Room 1" }).map(v => v.student), ["Room Label 1"]);
+assert.deepEqual(PACE_ADMIN.filterVisits(roomFilterVisits, { paceRoom: "PACE Room 2" }).map(v => v.student), ["Room Label 2"]);
+
 // Provider contract: reads all pages + schema and never calls a write method.
 let readCalls = 0;
 let writeCalls = 0;

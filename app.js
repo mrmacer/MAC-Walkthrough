@@ -3191,6 +3191,15 @@ const APP = {
       const reasons     = values("reasons");
       const optionHtml = (items, label) => `<option value="">${escHtml(label)}</option>${items.map(item =>
         `<option value="${escHtml(item)}">${escHtml(item)}</option>`).join("")}`;
+      // Filter options keep the visit's raw stored value (so filtering stays
+      // an exact match against normalizeVisit()'s paceRoom), but the label
+      // shown to the admin is the friendly "PACE Room 1 / Yellow Hall" via
+      // the shared roomInfo() — same helper the table/detail panel use.
+      const roomOptionHtml = items => `<option value="">All Rooms</option>${items.map(item => {
+        const info = PACE_ADMIN.roomInfo(item);
+        const label = info ? (info.hallway ? `${info.label} / ${info.hallway}` : info.label) : item;
+        return `<option value="${escHtml(item)}">${escHtml(label)}</option>`;
+      }).join("")}`;
 
       const today = new Date().toISOString().slice(0, 10);
       const start = new Date(`${today}T12:00:00`);
@@ -3226,7 +3235,7 @@ const APP = {
             <div class="form-field"><label class="form-label" for="pf-student">Student</label><select class="form-select" id="pf-student">${optionHtml(students, "All Students")}</select></div>
             ${specialists.length ? `<div class="form-field"><label class="form-label" for="pf-specialist">Behavior Specialist</label><select class="form-select" id="pf-specialist">${optionHtml(specialists, "All Specialists")}</select></div>` : ""}
             ${teachers.length && data.availability.teacherCameFrom ? `<div class="form-field"><label class="form-label" for="pf-teacher">Teacher Came From</label><select class="form-select" id="pf-teacher">${optionHtml(teachers, "All Teachers")}</select></div>` : ""}
-            ${rooms.length && data.availability.paceRoom ? `<div class="form-field"><label class="form-label" for="pf-room">PACE Room</label><select class="form-select" id="pf-room">${optionHtml(rooms, "All Rooms")}</select></div>` : ""}
+            ${rooms.length && data.availability.paceRoom ? `<div class="form-field"><label class="form-label" for="pf-room">PACE Room</label><select class="form-select" id="pf-room">${roomOptionHtml(rooms)}</select></div>` : ""}
             ${reasons.length ? `<div class="form-field"><label class="form-label" for="pf-reason">Reason</label><select class="form-select" id="pf-reason">${optionHtml(reasons, "All Reasons")}</select></div>` : ""}
             ${data.availability.scm ? `<div class="form-field"><label class="form-label" for="pf-scm">SCM</label><select class="form-select" id="pf-scm"><option value="">All</option><option value="yes">Used</option><option value="no">Not Used</option></select></div>` : ""}
             ${data.visits.some(v => v.durationMinutes !== null) ? `<div class="form-field"><label class="form-label" for="pf-duration">Duration</label><select class="form-select" id="pf-duration"><option value="">Any Duration</option><option value="under-45">Under 45 minutes</option><option value="45-plus">45+ minutes</option></select></div>` : ""}

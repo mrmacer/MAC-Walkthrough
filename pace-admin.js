@@ -19,7 +19,13 @@
     timeIn:          ["Time In", "TimeIn", "timeIn"],
     timeOut:         ["Time Out", "TimeOut", "timeOut"],
     duration:        ["Duration", "Duration Minutes", "DurationMinutes", "durationMinutes"],
-    paceRoom:        ["PACE Room", "Pace Room", "paceRoom"],
+    // "Room" is the confirmed live display name on IEP_Pace_Visits (manually
+    // verified in SharePoint) — listed first/highest priority. "PACE Room"/
+    // "Pace Room" stay as tolerated aliases (PACE Room Tracker's own write
+    // side still sends all three — see its config.js "ROOM-FIELD-NAME
+    // PATCH" comment), same alias-tolerance pattern used everywhere else in
+    // this file. Do not reorder "Room" below the others.
+    paceRoom:        ["Room", "PACE Room", "Pace Room", "paceRoom"],
     specialist:      ["Behavior Specialist", "Staff Member", "Submitted By", "submittedByName"],
     teacherCameFrom: ["Teacher Came From", "Teacher", "teacherCameFrom"],
     reason:          ["Reason", "Behavior", "Behaviors", "behaviors"],
@@ -31,21 +37,31 @@
   };
 
   // Room identity, matched exactly to PACE Room Tracker's own config.js —
-  // not invented here. "PACE Room" has no confirmed live SharePoint column
-  // as of this writing (see PACE Room Tracker's README "Known gaps"), so
-  // this only ever renders once/if that data starts arriving.
+  // not invented here. Keyed by room id (its own internal slug).
   const ROOM_INFO = {
     "pace-room-1": { label: "PACE Room 1", hallway: "Yellow Hall" },
     "pace-room-2": { label: "PACE Room 2", hallway: "Green Hall" }
   };
 
+  // PACE Room Tracker writes the human-readable LABEL ("PACE Room 1") into
+  // the live "Room" column, not the internal slug ("pace-room-1") — see its
+  // config.js ROOMS comment ("label... is what actually gets written").
+  // roomInfo() must therefore recognize a visit's raw value by EITHER form:
+  // the confirmed-live label, or the legacy/test-record slug. This index is
+  // derived from ROOM_INFO above, not a second independent mapping.
+  const ROOM_LOOKUP = {};
+  Object.entries(ROOM_INFO).forEach(([slug, info]) => {
+    ROOM_LOOKUP[slug] = info;
+    ROOM_LOOKUP[info.label.toLowerCase()] = info;
+  });
+
   function roomInfo(value) {
     const raw = String(value || "").trim();
     if (!raw) return null;
-    const known = ROOM_INFO[raw.toLowerCase()];
+    const known = ROOM_LOOKUP[raw.toLowerCase()];
     if (known) return { ...known, raw };
-    // Unrecognized room value (e.g. a future third room) — display as-is
-    // rather than guessing a hallway/color for it.
+    // Unrecognized room value (e.g. a future third room, or a manual
+    // SharePoint edit) — display as-is rather than guessing a hallway/color.
     return { label: raw, hallway: "", raw };
   }
 
