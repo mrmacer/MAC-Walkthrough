@@ -59,6 +59,54 @@ const history = PACE_ADMIN.studentHistory(visits, "Older Record", "2026-08-24");
 assert.equal(history.visits, 1, "incomplete historical rows remain visible but do not count as completed visits");
 assert.equal(history.totalMinutes, 45);
 
+// ── PATCH: multiple Behavior Specialists, PACE Room identity, open-visit
+//    history, and long/multi-paragraph Notes ─────────────────────────────
+
+const multiSpecialistVisit = PACE_ADMIN.normalizeVisit({
+  Student: "Izen Sosa", Date: "2026-08-27", "Time In": "11:21", "Time Out": "11:52",
+  "PACE Room": "pace-room-1", "Behavior Specialist": "Kelly Marchetti, Sharon Morgan",
+  "Teacher Came From": "Sickle", Reason: "Emotional Dysregulation, Needs a Break",
+  "Intervention Used": "Sensory Break, Verbal Processing", "SCM Used": "No",
+  Notes: "Line one of the note.\nLine two of the note.\n\nA new paragraph after a blank line."
+});
+assert.deepEqual(multiSpecialistVisit.specialists, ["Kelly Marchetti", "Sharon Morgan"],
+  "comma-separated specialists must be parsed into a list, not kept as one string");
+assert.equal(multiSpecialistVisit.teacherCameFrom, "Sickle");
+assert.equal(multiSpecialistVisit.scmUsed, false);
+assert.equal(multiSpecialistVisit.notes.includes("\n\n"), true,
+  "multi-paragraph notes must round-trip with line breaks intact, not be flattened");
+assert.equal(multiSpecialistVisit.notes.length > 60, true);
+
+const semicolonSpecialistVisit = PACE_ADMIN.normalizeVisit({
+  Student: "Semicolon Test", Date: "2026-08-27", "Behavior Specialist": "Kelly Marchetti; Sharon Morgan"
+});
+assert.deepEqual(semicolonSpecialistVisit.specialists, ["Kelly Marchetti", "Sharon Morgan"],
+  "semicolon-separated specialists must also be parsed into a list");
+
+const singleSpecialistVisit = PACE_ADMIN.normalizeVisit({
+  Student: "Older Single-Specialist Record", Date: "2026-08-01", "Staff Member": "Nikki Stock"
+});
+assert.deepEqual(singleSpecialistVisit.specialists, ["Nikki Stock"],
+  "an older plain single-name record must still yield a one-element list, not break");
+
+assert.deepEqual(PACE_ADMIN.roomInfo("pace-room-1"), { label: "PACE Room 1", hallway: "Yellow Hall", raw: "pace-room-1" });
+assert.deepEqual(PACE_ADMIN.roomInfo("pace-room-2"), { label: "PACE Room 2", hallway: "Green Hall", raw: "pace-room-2" });
+assert.equal(PACE_ADMIN.roomInfo(""), null, "a blank room value must not be rendered as a fabricated room");
+assert.equal(PACE_ADMIN.roomInfo("PACE Room 3").label, "PACE Room 3",
+  "an unrecognized future room value must display as-is rather than guessing a hallway");
+
+// A currently-open visit (today, no Time Out) must surface separately from
+// completed history, and must not corrupt average/total duration metrics.
+const openToday = PACE_ADMIN.normalizeVisit({ Student: "Open Case", Date: "2026-08-24", "Time In": "13:10" });
+const oldDangling = PACE_ADMIN.normalizeVisit({ Student: "Open Case", Date: "2026-07-01", "Time In": "09:00" });
+const openCompleted = PACE_ADMIN.normalizeVisit({
+  Student: "Open Case", Date: "2026-08-20", "Time In": "09:00", "Time Out": "09:20", Duration: 20
+});
+const openCaseHistory = PACE_ADMIN.studentHistory([openToday, oldDangling, openCompleted], "Open Case", "2026-08-24");
+assert.equal(openCaseHistory.openVisits.length, 2, "both the today-open and old-dangling visits are surfaced as open");
+assert.equal(openCaseHistory.recentVisits.length, 1, "only the completed visit appears in recentVisits");
+assert.equal(openCaseHistory.averageDuration, 20, "the open visits' missing duration must not affect the average");
+
 // Provider contract: reads all pages + schema and never calls a write method.
 let readCalls = 0;
 let writeCalls = 0;

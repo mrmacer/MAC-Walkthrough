@@ -30,6 +30,25 @@
     returnStatus:    ["Return Status", "returnStatus"]
   };
 
+  // Room identity, matched exactly to PACE Room Tracker's own config.js —
+  // not invented here. "PACE Room" has no confirmed live SharePoint column
+  // as of this writing (see PACE Room Tracker's README "Known gaps"), so
+  // this only ever renders once/if that data starts arriving.
+  const ROOM_INFO = {
+    "pace-room-1": { label: "PACE Room 1", hallway: "Yellow Hall" },
+    "pace-room-2": { label: "PACE Room 2", hallway: "Green Hall" }
+  };
+
+  function roomInfo(value) {
+    const raw = String(value || "").trim();
+    if (!raw) return null;
+    const known = ROOM_INFO[raw.toLowerCase()];
+    if (known) return { ...known, raw };
+    // Unrecognized room value (e.g. a future third room) — display as-is
+    // rather than guessing a hallway/color for it.
+    return { label: raw, hallway: "", raw };
+  }
+
   let _cache = null;
   let _cacheAt = 0;
 
@@ -106,7 +125,11 @@
       timeOut,
       durationMinutes: visitDuration,
       paceRoom:        text(firstValue(row, FIELD_ALIASES.paceRoom)),
-      specialist:      text(firstValue(row, FIELD_ALIASES.specialist)),
+      // "Behavior Specialist" is written comma-joined for one or more
+      // selected people (PACE Room Tracker PATCH 010 — same convention as
+      // Reason/Intervention Used below), so it's parsed as a list the same
+      // way. An older single-name record just yields a one-element array.
+      specialists:     list(firstValue(row, FIELD_ALIASES.specialist)),
       teacherCameFrom: text(firstValue(row, FIELD_ALIASES.teacherCameFrom)),
       reasons:         list(firstValue(row, FIELD_ALIASES.reason)),
       supports:        list(firstValue(row, FIELD_ALIASES.support)),
@@ -145,7 +168,7 @@
     return (visits || []).filter(visit => {
       if (!inRange(visit, f.from, f.to)) return false;
       if (f.student && visit.student !== f.student) return false;
-      if (f.specialist && visit.specialist !== f.specialist) return false;
+      if (f.specialist && !visit.specialists.includes(f.specialist)) return false;
       if (f.teacherCameFrom && visit.teacherCameFrom !== f.teacherCameFrom) return false;
       if (f.paceRoom && visit.paceRoom !== f.paceRoom) return false;
       if (f.reason && !visit.reasons.includes(f.reason)) return false;
@@ -154,8 +177,8 @@
       if (f.duration === "45-plus" && !(visit.durationMinutes >= 45)) return false;
       if (f.duration === "under-45" && !(visit.durationMinutes !== null && visit.durationMinutes < 45)) return false;
       if (search) {
-        const haystack = [visit.student, visit.specialist, visit.teacherCameFrom, visit.paceRoom,
-          ...visit.reasons, ...visit.supports, visit.notes].join(" ").toLowerCase();
+        const haystack = [visit.student, visit.teacherCameFrom, visit.paceRoom,
+          ...visit.specialists, ...visit.reasons, ...visit.supports, visit.notes].join(" ").toLowerCase();
         if (!haystack.includes(search)) return false;
       }
       return true;
@@ -243,12 +266,19 @@
   function studentHistory(visits, student, today) {
     const from = addDays(today, -29);
     const matching = (visits || []).filter(v => v.student === student);
+    // Metrics (visits/totalMinutes/averageDuration/etc.) stay completed-visit
+    // only, per summarize()'s existing rule — an open visit has no duration
+    // yet and must not skew "Average Visit"/"Total PACE Time".
     const summary = summarize(matching, { from, to: today });
     return {
       student,
       from,
       to: today,
       ...summary,
+      // Any currently-open visit is surfaced separately (not folded into
+      // "completed" metrics or counted against the 10-item recent cap) so
+      // an admin reviewing a student's history can see it's in progress.
+      openVisits:   matching.filter(v => !v.isCompleted).sort(sortNewest),
       recentVisits: [...matching].filter(v => v.isCompleted).sort(sortNewest).slice(0, 10)
     };
   }
@@ -278,6 +308,8 @@
   return {
     LIST_NAME,
     FIELD_ALIASES,
+    ROOM_INFO,
+    roomInfo,
     calculateDuration,
     normalizeVisit,
     getAvailability,

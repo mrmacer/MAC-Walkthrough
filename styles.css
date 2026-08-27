@@ -2841,8 +2841,91 @@ tbody tr:hover td { background: var(--color-primary-light); }
 
 .pace-notes { margin-top: 6px; color: var(--text-secondary); font-size: 11.5px; }
 .pace-notes summary { color: var(--color-primary); cursor: pointer; }
-.pace-notes p { max-width: 380px; margin: 6px 0 0; white-space: normal; line-height: 1.45; }
+/* white-space: pre-wrap preserves the note's own line breaks instead of
+   collapsing them — do not change back to "normal". */
+.pace-notes p { max-width: 380px; margin: 6px 0 0; white-space: pre-wrap; line-height: 1.45; }
 .pace-result-limit { margin: 0; padding: 12px 16px; border-top: 1px solid var(--border); color: var(--text-muted); font-size: 12px; }
+
+/* Student History — expandable visit rows + full visit detail (Part 2/3) */
+
+.pace-visit-list { display: flex; flex-direction: column; gap: 8px; }
+.pace-visit-list-open { margin-bottom: 18px; }
+
+.pace-visit-row {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  overflow: hidden;
+}
+.pace-visit-list-open .pace-visit-row { border-color: var(--orange-border); background: var(--orange-bg); }
+
+.pace-visit-summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  padding: 12px 14px;
+  cursor: pointer;
+  list-style: none;
+}
+.pace-visit-summary::-webkit-details-marker { display: none; }
+.pace-visit-summary-date { font-weight: 700; color: var(--text-primary); min-width: 92px; }
+.pace-visit-summary-duration { color: var(--text-secondary); font-size: 12.5px; min-width: 70px; }
+.pace-visit-summary-reason { color: var(--text-secondary); font-size: 12.5px; flex: 1; min-width: 140px; }
+.pace-visit-summary-specialist { color: var(--text-muted); font-size: 12px; }
+.pace-visit-summary-toggle { margin-left: auto; color: var(--color-primary); font-size: 12px; font-weight: 600; white-space: nowrap; }
+.pace-visit-summary-toggle-open { display: none; }
+.pace-visit-row[open] .pace-visit-summary-toggle-closed { display: none; }
+.pace-visit-row[open] .pace-visit-summary-toggle-open { display: inline; }
+/* "Currently in PACE" (today, still open) reads as an active/urgent state;
+   an old dangling record without a Time Out uses the plain .pace-record-badge look. */
+.pace-badge-open-now { background: var(--orange); color: #fff; }
+
+.pace-visit-details {
+  padding: 4px 16px 16px;
+  border-top: 1px solid var(--border);
+}
+
+.pace-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 12px 20px;
+  margin: 14px 0;
+}
+.pace-detail-field span,
+.pace-detail-field-label {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--text-muted);
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}
+.pace-detail-field strong { display: block; color: var(--text-primary); font-weight: 600; font-size: 13px; line-height: 1.4; }
+.pace-detail-field-tags { grid-column: 1 / -1; }
+.pace-detail-field-tags .pace-tag-row { margin-top: 4px; }
+
+.pace-visit-notes-block { margin-top: 16px; }
+.pace-visit-notes-text {
+  margin-top: 6px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--color-primary);
+  border-radius: var(--radius);
+  background: var(--surface-subtle, #f8fafc);
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.pace-visit-notes-empty { margin: 6px 0 0; color: var(--text-muted); font-size: 12.5px; font-style: italic; }
+
+@media (max-width: 640px) {
+  .pace-visit-summary { gap: 3px 10px; }
+  .pace-visit-summary-toggle { margin-left: 0; flex-basis: 100%; }
+}
 
 .report-modal-panel.pace-history-panel { width: min(900px, calc(100vw - 32px)); }
 .pace-history-heading { align-items: flex-start; margin-bottom: 16px; }

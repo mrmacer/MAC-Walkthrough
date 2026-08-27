@@ -27,6 +27,16 @@ function fmtDateTime(iso) {
     " " + d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
 }
 
+// Formats a stored "HH:MM" (24-hour) time string as a 12-hour clock label,
+// e.g. "11:21 AM". Returns "" for anything that doesn't parse.
+function fmtClockTime(hhmm) {
+  const m = String(hhmm || "").match(/^(\d{1,2}):(\d{2})/);
+  if (!m) return "";
+  const d = new Date();
+  d.setHours(Number(m[1]), Number(m[2]), 0, 0);
+  return d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+}
+
 function getWeekOf(dateStr) {
   const d = new Date(dateStr + "T12:00:00");
   if (isNaN(d)) return "";
@@ -3175,7 +3185,7 @@ const APP = {
       const values = key => [...new Set(data.visits.flatMap(v => Array.isArray(v[key]) ? v[key] : [v[key]]).filter(Boolean))]
         .sort((a, b) => a.localeCompare(b));
       const students    = values("student");
-      const specialists = values("specialist");
+      const specialists = values("specialists");
       const teachers    = values("teacherCameFrom");
       const rooms       = values("paceRoom");
       const reasons     = values("reasons");
@@ -3273,8 +3283,11 @@ const APP = {
     const completed = filtered.filter(v => v.isCompleted);
     const summary = PACE_ADMIN.summarize(filtered);
     const shown = filtered.slice(0, 200);
-    const roomLabel = room => ({ "pace-room-1": "PACE Room 1", "pace-room-2": "PACE Room 2" }[room] || room || "—");
-    const showSpecialist = this._paceAdminData.availability.specialist && this._paceAdminData.visits.some(v => v.specialist);
+    const roomLabel = room => {
+      const info = PACE_ADMIN.roomInfo(room);
+      return info ? (info.hallway ? `${info.label} · ${info.hallway}` : info.label) : "—";
+    };
+    const showSpecialist = this._paceAdminData.availability.specialist && this._paceAdminData.visits.some(v => v.specialists.length);
     const showTeacher    = this._paceAdminData.availability.teacherCameFrom && this._paceAdminData.visits.some(v => v.teacherCameFrom);
     const showRoom       = this._paceAdminData.availability.paceRoom && this._paceAdminData.visits.some(v => v.paceRoom);
     const showScm        = this._paceAdminData.availability.scm && this._paceAdminData.visits.some(v => v.scmUsed !== null);
@@ -3299,7 +3312,7 @@ const APP = {
             <td>${visit.student ? `<button class="pace-student-link" data-student="${escHtml(visit.student)}">${escHtml(visit.student)}</button>` : "—"}${!visit.isCompleted ? `<div><span class="pace-record-badge">Older / incomplete</span></div>` : ""}</td>
             <td>${visit.durationMinutes !== null ? `${visit.durationMinutes} min` : "—"}</td>
             <td><div class="pace-tag-row">${visit.reasons.map(reason => `<span class="pace-tag">${escHtml(reason)}</span>`).join("")}</div>${visit.supports.length ? `<div class="pace-cell-sub">Support: ${escHtml(visit.supports.join(", "))}</div>` : ""}${visit.notes ? `<details class="pace-notes"><summary>Notes</summary><p>${escHtml(visit.notes)}</p></details>` : ""}</td>
-            ${showSpecialist ? `<td>${escHtml(visit.specialist || "—")}</td>` : ""}
+            ${showSpecialist ? `<td>${visit.specialists.length ? escHtml(visit.specialists.join(", ")) : "—"}</td>` : ""}
             ${showTeacher ? `<td>${escHtml(visit.teacherCameFrom || "—")}</td>` : ""}
             ${showRoom ? `<td>${escHtml(roomLabel(visit.paceRoom))}</td>` : ""}
             ${showScm ? `<td>${visit.scmUsed === null ? "—" : visit.scmUsed ? `<span class="badge badge-red">Yes</span>` : "No"}</td>` : ""}
@@ -3319,9 +3332,10 @@ const APP = {
     if (!modal || !body) return;
     const today = new Date().toISOString().slice(0, 10);
     const history = PACE_ADMIN.studentHistory(this._paceAdminData.visits, student, today);
+    const availability = this._paceAdminData.availability;
     const a = {
-      ...this._paceAdminData.availability,
-      specialist: this._paceAdminData.availability.specialist && history.recentVisits.some(v => v.specialist)
+      ...availability,
+      specialist: availability.specialist && [...history.recentVisits, ...history.openVisits].some(v => v.specialists.length)
     };
     const metric = (label, value) => `<div class="stat-card"><div class="stat-label">${escHtml(label)}</div><div class="stat-value">${escHtml(value)}</div></div>`;
 
@@ -3338,12 +3352,92 @@ const APP = {
         ${history.mostCommonReason ? `<div><span>Most Common Reason</span><strong>${escHtml(history.mostCommonReason[0])}</strong></div>` : ""}
         ${a.teacherCameFrom && history.mostCommonTeacher ? `<div><span>Most Common Teacher Came From</span><strong>${escHtml(history.mostCommonTeacher[0])}</strong></div>` : ""}
       </div>
+      ${history.openVisits.length ? `
+      <h4 class="pace-history-recent-title">Open Visit${history.openVisits.length !== 1 ? "s" : ""}</h4>
+      <div class="pace-visit-list pace-visit-list-open">
+        ${history.openVisits.map(visit => this._paceVisitRowHtml(visit, a, today)).join("")}
+      </div>` : ""}
       <h4 class="pace-history-recent-title">Recent Visits</h4>
-      ${history.recentVisits.length ? `<div class="table-wrap"><table class="reports-table"><thead><tr><th>Date</th><th>Duration</th><th>Reason</th>${a.specialist ? "<th>Specialist</th>" : ""}</tr></thead><tbody>
-        ${history.recentVisits.map(visit => `<tr><td>${visit.date ? escHtml(fmtDate(visit.date + "T12:00:00")) : "—"}<div class="pace-cell-sub">${escHtml(visit.timeIn)} → ${escHtml(visit.timeOut)}</div></td><td>${visit.durationMinutes !== null ? visit.durationMinutes + " min" : "—"}</td><td>${escHtml(visit.reasons.join(", ") || "—")}</td>${a.specialist ? `<td>${escHtml(visit.specialist || "—")}</td>` : ""}</tr>`).join("")}
-      </tbody></table></div>` : `<div class="empty-state"><p>No completed visits in this period.</p></div>`}`;
+      ${history.recentVisits.length
+        ? `<div class="pace-visit-list">${history.recentVisits.map(visit => this._paceVisitRowHtml(visit, a, today)).join("")}</div>`
+        : `<div class="empty-state"><p>No completed visits in this period.</p></div>`}`;
     document.getElementById("pace-history-title").textContent = `${student} — PACE History`;
     modal.classList.remove("hidden");
+  },
+
+  // One expandable "Recent Visits" row: a compact summary line (the
+  // <summary>) plus the full visit-detail panel beneath it (Part 3),
+  // rendered inline via native <details> — no second modal, no JS toggle
+  // wiring needed. `today` distinguishes a currently-open visit from an
+  // old record that simply never received a Time Out.
+  _paceVisitRowHtml(visit, availability, today) {
+    const dateLabel = visit.date ? fmtDate(visit.date + "T12:00:00") : "—";
+    const reasonSummary = visit.reasons.join(", ") || "—";
+    const specialistSummary = availability.specialist && visit.specialists.length
+      ? escHtml(visit.specialists.join(", ")) : "";
+    const statusBadge = !visit.isCompleted
+      ? `<span class="pace-record-badge${visit.date === today ? " pace-badge-open-now" : ""}">${visit.date === today ? "Currently in PACE" : "Open / incomplete"}</span>`
+      : "";
+
+    return `
+      <details class="pace-visit-row">
+        <summary class="pace-visit-summary">
+          <span class="pace-visit-summary-date">${escHtml(dateLabel)}</span>
+          <span class="pace-visit-summary-duration">${visit.durationMinutes !== null ? `${visit.durationMinutes} min` : (visit.isCompleted ? "—" : "In progress")}</span>
+          <span class="pace-visit-summary-reason">${escHtml(reasonSummary)}</span>
+          ${specialistSummary ? `<span class="pace-visit-summary-specialist">${specialistSummary}</span>` : ""}
+          ${statusBadge}
+          <span class="pace-visit-summary-toggle" aria-hidden="true">
+            <span class="pace-visit-summary-toggle-closed">View Details</span>
+            <span class="pace-visit-summary-toggle-open">Hide Details</span>
+          </span>
+        </summary>
+        ${this._paceVisitDetailHtml(visit, availability)}
+      </details>`;
+  },
+
+  // Part 3 — the full visit-detail panel. Every field is gated by the live
+  // schema's `availability` flags (never fabricated) and every per-row gap
+  // renders a plain placeholder rather than being silently omitted.
+  _paceVisitDetailHtml(visit, availability) {
+    const room = availability.paceRoom ? PACE_ADMIN.roomInfo(visit.paceRoom) : null;
+    const field = (label, value) => `
+      <div class="pace-detail-field"><span>${escHtml(label)}</span><strong>${value}</strong></div>`;
+    const tagField = (label, items) => `
+      <div class="pace-detail-field pace-detail-field-tags"><span>${escHtml(label)}</span>
+        ${items.length ? `<div class="pace-tag-row">${items.map(i => `<span class="pace-tag">${escHtml(i)}</span>`).join("")}</div>` : "<strong>—</strong>"}
+      </div>`;
+
+    const timeRange = (visit.timeIn || visit.timeOut)
+      ? `${visit.timeIn ? escHtml(fmtClockTime(visit.timeIn)) : "—"} → ${visit.timeOut ? escHtml(fmtClockTime(visit.timeOut)) : (visit.isCompleted ? "—" : "In progress")}`
+      : "Not recorded";
+
+    const scmValue = !availability.scm ? null
+      : visit.scmUsed === null ? "Not recorded" : (visit.scmUsed ? "Yes" : "No");
+
+    return `
+      <div class="pace-visit-details">
+        <div class="pace-detail-grid">
+          ${field("Date", escHtml(visit.date ? fmtDate(visit.date + "T12:00:00") : "Not recorded"))}
+          ${availability.paceRoom ? field("PACE Room", escHtml(room ? (room.hallway ? `${room.label} · ${room.hallway}` : room.label) : "Not recorded")) : ""}
+          ${field("Time", timeRange)}
+          ${field("Duration", visit.durationMinutes !== null ? `${visit.durationMinutes} minutes` : (visit.isCompleted ? "Not recorded" : "Visit is still open"))}
+          ${availability.specialist ? field(
+            `Behavior Interventionist${visit.specialists.length > 1 ? "s" : ""}`,
+            visit.specialists.length ? visit.specialists.map(escHtml).join("<br>") : "Not recorded"
+          ) : ""}
+          ${availability.teacherCameFrom ? field("Teacher Came From", escHtml(visit.teacherCameFrom || "Not recorded")) : ""}
+          ${scmValue !== null ? field("SCM", escHtml(scmValue)) : ""}
+        </div>
+        ${tagField("Reason", visit.reasons)}
+        ${tagField("Support / Intervention", visit.supports)}
+        <div class="pace-visit-notes-block">
+          <span class="pace-detail-field-label">Notes</span>
+          ${visit.notes
+            ? `<div class="pace-visit-notes-text">${escHtml(visit.notes)}</div>`
+            : `<p class="pace-visit-notes-empty">No notes recorded.</p>`}
+        </div>
+      </div>`;
   },
 
   // Legacy operational form retained as an internal rollback path only. The
