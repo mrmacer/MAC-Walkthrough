@@ -106,6 +106,74 @@ const openCaseHistory = PACE_ADMIN.studentHistory([openToday, oldDangling, openC
 assert.equal(openCaseHistory.openVisits.length, 2, "both the today-open and old-dangling visits are surfaced as open");
 assert.equal(openCaseHistory.recentVisits.length, 1, "only the completed visit appears in recentVisits");
 assert.equal(openCaseHistory.averageDuration, 20, "the open visits' missing duration must not affect the average");
+assert.equal(openToday.scmUsed, null, "an open visit legitimately has no SCM answer yet");
+
+// ── PATCH: PACE Room + SCM surfaced throughout admin reporting ───────────
+
+// Room normalization end-to-end: normalizeVisit()'s raw paceRoom value
+// chained through roomInfo(), not a literal string re-typed in the test.
+assert.equal(multiSpecialistVisit.paceRoom, "pace-room-1");
+const room1 = PACE_ADMIN.roomInfo(multiSpecialistVisit.paceRoom);
+assert.equal(room1.label, "PACE Room 1");
+assert.equal(room1.hallway, "Yellow Hall");
+
+const room2Visit = PACE_ADMIN.normalizeVisit({ Student: "Room 2 Test", Date: "2026-08-27", "PACE Room": "pace-room-2" });
+const room2 = PACE_ADMIN.roomInfo(room2Visit.paceRoom);
+assert.equal(room2.label, "PACE Room 2");
+assert.equal(room2.hallway, "Green Hall");
+
+const missingRoomVisit = PACE_ADMIN.normalizeVisit({ Student: "No Room Recorded", Date: "2026-08-27" });
+assert.equal(missingRoomVisit.paceRoom, "", "a record with no PACE Room column value must not fabricate one");
+assert.equal(PACE_ADMIN.roomInfo(missingRoomVisit.paceRoom), null);
+
+const scmYesVisit = PACE_ADMIN.normalizeVisit({ Student: "SCM Yes Test", Date: "2026-08-27", "SCM Used": "Yes" });
+assert.equal(scmYesVisit.scmUsed, true);
+const scmNoVisit = PACE_ADMIN.normalizeVisit({ Student: "SCM No Test", Date: "2026-08-27", "SCM Used": "No" });
+assert.equal(scmNoVisit.scmUsed, false);
+const scmMissingVisit = PACE_ADMIN.normalizeVisit({ Student: "SCM Missing Test", Date: "2026-08-27" });
+assert.equal(scmMissingVisit.scmUsed, null, "no SCM Used value must stay unknown, never become false");
+
+// Room / SCM filters
+const roomFiltered = PACE_ADMIN.filterVisits([multiSpecialistVisit, room2Visit], { paceRoom: "pace-room-1" });
+assert.deepEqual(roomFiltered.map(v => v.student), ["Izen Sosa"], "room filter must return only matching-room visits");
+
+const scmFilterVisits = [scmYesVisit, scmNoVisit, scmMissingVisit];
+assert.deepEqual(PACE_ADMIN.filterVisits(scmFilterVisits, { scm: "yes" }).map(v => v.student), ["SCM Yes Test"]);
+assert.deepEqual(PACE_ADMIN.filterVisits(scmFilterVisits, { scm: "no" }).map(v => v.student), ["SCM No Test"]);
+assert.equal(PACE_ADMIN.filterVisits(scmFilterVisits, {}).length, 3, "no SCM filter applied returns every visit, missing included");
+
+// SCM Events metric: only explicit Yes counts, blank/null never counted as No
+const scmMetricVisits = [
+  PACE_ADMIN.normalizeVisit({ Student: "A", Date: "2026-08-24", "Time In": "09:00", "Time Out": "09:20", "SCM Used": "Yes" }),
+  PACE_ADMIN.normalizeVisit({ Student: "B", Date: "2026-08-24", "Time In": "10:00", "Time Out": "10:20", "SCM Used": "Yes" }),
+  PACE_ADMIN.normalizeVisit({ Student: "C", Date: "2026-08-24", "Time In": "11:00", "Time Out": "11:20", "SCM Used": "No" }),
+  PACE_ADMIN.normalizeVisit({ Student: "D", Date: "2026-08-24", "Time In": "12:00", "Time Out": "12:20" }), // completed, SCM never recorded
+  PACE_ADMIN.normalizeVisit({ Student: "E", Date: "2026-08-24", "Time In": "13:00" }) // open, SCM blank until completion
+];
+const scmSummary = PACE_ADMIN.summarize(scmMetricVisits);
+assert.equal(scmSummary.scmEvents, 2, "SCM Events must count only the 2 explicit Yes visits, not the blank/open ones");
+
+const scmHistory = PACE_ADMIN.studentHistory(
+  [{ ...scmMetricVisits[0], student: "SCM Metric Student" }, { ...scmMetricVisits[2], student: "SCM Metric Student" }],
+  "SCM Metric Student", "2026-08-24"
+);
+assert.equal(scmHistory.scmEvents, 1, "student-history SCM Events must also count only explicit Yes");
+
+// Full student-history detail: Room + SCM appear alongside every other field
+const fullDetailVisit = PACE_ADMIN.normalizeVisit({
+  Student: "Full Detail Student", Date: "2026-08-27", "Time In": "11:21", "Time Out": "11:52",
+  "PACE Room": "pace-room-1", "Behavior Specialist": "Kelly Marchetti, Sharon Morgan",
+  "Teacher Came From": "Sickle", Reason: "Emotional Dysregulation, Needs a Break",
+  "Intervention Used": "Sensory Break, Verbal Processing", "SCM Used": "No",
+  Notes: "Full detail check."
+});
+assert.equal(fullDetailVisit.paceRoom, "pace-room-1");
+assert.equal(fullDetailVisit.scmUsed, false);
+assert.equal(fullDetailVisit.teacherCameFrom, "Sickle");
+assert.deepEqual(fullDetailVisit.specialists, ["Kelly Marchetti", "Sharon Morgan"]);
+assert.deepEqual(fullDetailVisit.reasons, ["Emotional Dysregulation", "Needs a Break"]);
+assert.deepEqual(fullDetailVisit.supports, ["Sensory Break", "Verbal Processing"]);
+assert.equal(fullDetailVisit.notes, "Full detail check.");
 
 // Provider contract: reads all pages + schema and never calls a write method.
 let readCalls = 0;

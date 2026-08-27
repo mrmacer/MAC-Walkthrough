@@ -3412,8 +3412,13 @@ const APP = {
       ? `${visit.timeIn ? escHtml(fmtClockTime(visit.timeIn)) : "—"} → ${visit.timeOut ? escHtml(fmtClockTime(visit.timeOut)) : (visit.isCompleted ? "—" : "In progress")}`
       : "Not recorded";
 
+    // A blank SCM on an open visit is expected — it's filled in on
+    // completion (same distinction already used for Duration above), not a
+    // genuine data gap. Only a blank SCM on a completed visit is "Not
+    // recorded"; never interpret either case as "No".
     const scmValue = !availability.scm ? null
-      : visit.scmUsed === null ? "Not recorded" : (visit.scmUsed ? "Yes" : "No");
+      : visit.scmUsed !== null ? (visit.scmUsed ? "Yes" : "No")
+      : (visit.isCompleted ? "Not recorded" : "Pending — visit still open");
 
     return `
       <div class="pace-visit-details">

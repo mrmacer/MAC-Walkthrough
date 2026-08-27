@@ -54,4 +54,25 @@ assert.match(app, /PACE_ADMIN\.roomInfo\(/);
 assert.match(paceAdmin, /specialists:\s*list\(firstValue\(row, FIELD_ALIASES\.specialist\)\)/);
 assert.match(paceAdmin, /function roomInfo\(/);
 
+// PACE Room + SCM surfaced patch
+assert.match(paceAdmin, /paceRoom:\s*\["PACE Room", "Pace Room", "paceRoom"\]/, "PACE Room aliases must use the confirmed display name");
+assert.match(paceAdmin, /scm:\s*\["SCM Used", "SCM", "scmUsed"\]/, "SCM aliases must use the confirmed display name");
+assert.match(paceAdmin, /"pace-room-1":\s*\{\s*label:\s*"PACE Room 1",\s*hallway:\s*"Yellow Hall"/);
+assert.match(paceAdmin, /"pace-room-2":\s*\{\s*label:\s*"PACE Room 2",\s*hallway:\s*"Green Hall"/);
+
+// Student-history detail panel shows Room + SCM alongside every other field
+assert.match(app, /field\("PACE Room"/);
+assert.match(app, /field\("SCM"/);
+assert.match(app, /Pending — visit still open/, "an open visit's blank SCM must read as pending, not as data loss or a negative answer");
+
+// #pace report: Room + SCM columns and filters
+assert.match(app, /id="pf-room"/);
+assert.match(app, /id="pf-scm"/);
+assert.match(app, /showRoom \? "<th>Room<\/th>"/);
+assert.match(app, /showScm \? "<th>SCM<\/th>"/);
+
+// SCM Events summary metric, both in student history and the dashboard card
+assert.match(app, /SCM Events/);
+assert.match(dashboard, /PACE_ADMIN\.dashboardMetrics/);
+
 console.log("PACE admin route and read-only integration checks passed.");
