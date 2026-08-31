@@ -154,5 +154,10 @@ const CONFIG = {
   // placeholder ("REPLACE_WITH_2026_27_STUDENT_LIST"). Now that a real
   // production list name is configured below, that fallback no longer runs
   // under normal operation — IEP_Students_2026_27 is authoritative.
-  STUDENT_ROSTER_LIST: "IEP_Students_2026_27"
+  STUDENT_ROSTER_LIST: "IEP_Students_2026_27",
+
+  // PATCH A: new cross-app permission registry (Daily Pulse/PACE/
+  // Walkthrough/Admin Panel flags + Teacher/Classroom), separate from
+  // IEP_Users2. See iep-app-users.js.
+  APP_USERS_LIST: "IEP_App_Users"
 };

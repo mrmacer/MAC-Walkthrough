@@ -401,9 +401,20 @@ const USER_CONTEXT = {
   }
 };
 
+// PATCH E: set once per boot by APP.init(), right after the IEP_App_Users
+// Admin Panel gate resolves — see the comment there. Starts false (fail
+// closed) so a route check that somehow runs before that gate completes
+// never defaults to allow.
+let MAC_ADMIN_PANEL_ALLOWED = false;
+
 function canAccessRoute(route) {
   if (USER_CONTEXT.effectiveRole === "teacher") return TEACHER_ALLOWED_ROUTES.has(route);
-  return true;
+  // FIXED (Phase 1 audit gap): this used to unconditionally `return true`
+  // for any role other than literally "teacher" — a Behavior Specialist,
+  // a blank/misspelled Role, or any future role got full admin access via
+  // direct #hash navigation. It's now gated on the same Admin Panel
+  // decision APP.init() already required to enter the app at all.
+  return MAC_ADMIN_PANEL_ALLOWED;
 }
 
 function recordBelongsToTeacher(record, teacher, roster) {
@@ -1183,6 +1194,43 @@ const APP = {
       email:  AUTH.account?.username || "",
       role:   AUTH.role
     };
+
+    // PATCH E: the strongest gate in the suite. MAC-Walkthrough now
+    // requires IEP_App_Users -> Admin Panel = true for EVERYONE, including
+    // a "teacher" role that historically reached this app's own #pulse
+    // route — teachers belong in the standalone Daily Pulse app instead
+    // (see the suite's design philosophy). This replaces canAccessRoute()'s
+    // old "anything that isn't literally role=teacher gets full access"
+    // default — see MAC_ADMIN_PANEL_ALLOWED below, which canAccessRoute()
+    // now consults on every navigation (including a direct #hash edit), so
+    // a denied user can never reach a protected route by any path. No
+    // protected data (PACE analytics, Daily Pulse analytics, walkthrough
+    // history, reports, dashboards) loads before this check completes —
+    // everything below it (seeding, nav binding, and above all
+    // this.navigate(landing)) only runs once it has passed.
+    //
+    // MIGRATION MODE (see iep-app-users.js): no matching IEP_App_Users row
+    // falls back to AUTH.isAdmin (an active Administrator per IEP_Users2)
+    // — never the old permissive default. A lookup failure always denies,
+    // even for an Administrator.
+    await APP_USERS.resolve(AUTH.account?.username || "");
+    const adminPanelDecision = APP_USERS.decide("Admin Panel", AUTH.isAdmin);
+    MAC_ADMIN_PANEL_ALLOWED = adminPanelDecision.allowed;
+    if (!adminPanelDecision.allowed) {
+      loginScreen.classList.remove("hidden");
+      loginError.textContent = "You are signed in, but your account does not currently have access to this application.";
+      loginError.classList.remove("hidden");
+      const signedInAsEl = document.getElementById("loginSignedInAs");
+      if (signedInAsEl) {
+        signedInAsEl.textContent =
+          `Signed in as: ${USER_CONTEXT.actualUser.name || USER_CONTEXT.actualUser.email}. ` +
+          "Contact an IEP Skook administrator if you believe this is incorrect.";
+        signedInAsEl.classList.remove("hidden");
+      }
+      loginBtn.textContent = "Sign in with a different account";
+      loginBtn.addEventListener("click", () => AUTH.logout());
+      return;
+    }
 
     if (AUTH.isAdmin) {
       try {
