@@ -466,6 +466,75 @@ function normalizeSetupUser(item) {
   };
 }
 
+// Tolerant Role reader for IEP_Users2 — a person can legitimately hold more
+// than one role (e.g. "Teacher; Behavior Specialist", an array, or a
+// SharePoint multi-choice column's {results:[...]} shape from Graph).
+// Unlike auth.js's normalizeUserRole() (a single-role sign-in gate that only
+// ever looks at the first value), this returns every role token present so
+// "does this person's role set include Teacher" is answered correctly
+// regardless of how many roles they hold.
+function normalizeRoleTokens(value) {
+  let raw = value;
+  if (raw && typeof raw === "object" && Array.isArray(raw.results)) raw = raw.results;
+  const list = Array.isArray(raw) ? raw : String(raw || "").split(/[;,]/);
+  return list.map(v => String(v || "").trim().toLowerCase()).filter(Boolean);
+}
+
+function isTeacherRole(value) {
+  return normalizeRoleTokens(value).includes("teacher");
+}
+
+function splitNameParts(fullName) {
+  const raw = String(fullName || "").trim();
+  if (!raw) return { first: "", last: "" };
+  if (raw.includes(",")) {
+    const [last, first] = raw.split(",");
+    return { first: (first || "").trim(), last: (last || "").trim() };
+  }
+  const parts = raw.split(/\s+/).filter(Boolean);
+  return { first: parts[0] || "", last: parts[parts.length - 1] || "" };
+}
+
+// Setup → Students' Teacher dropdown must SAVE the same canonical Teacher
+// value already used in IEP_Students_2026_27 (production examples look like
+// "Bossons, A"), not the IEP_Users2 display name verbatim — Daily Pulse/PACE
+// match a student to their teacher by exact string equality against that
+// roster value (see STUDENT_ROSTER._matchesTeacher()). Rather than guess a
+// name-format transformation, this looks for an EXISTING roster record
+// already assigned to the same person (matched by surname, disambiguated by
+// first-initial on a surname collision) and reuses that exact, already-
+// confirmed-correct value verbatim. Only when no student is yet assigned to
+// this teacher does it fall back to a constructed "Last, F" guess (matching
+// IEP_Users2's own "Last, First" Add User convention, abbreviated) — that
+// fallback is not confirmed against live data and should be spot-checked
+// the first time a brand-new teacher is actually assigned a student.
+function resolveCanonicalTeacherValue(displayName, rosterStudents) {
+  const { first, last } = splitNameParts(displayName);
+  if (!last) return displayName;
+
+  const candidates = [...new Set(
+    (rosterStudents || [])
+      .map(s => s.teacherName)
+      .filter(Boolean)
+      .filter(value => splitNameParts(value).last.toLowerCase() === last.toLowerCase())
+  )];
+
+  if (candidates.length === 1) return candidates[0];
+
+  if (candidates.length > 1 && first) {
+    // Surname collision (e.g. two teachers named "Smith") — narrow by
+    // first-initial before giving up; never guess further than that.
+    const initial = first.charAt(0).toLowerCase();
+    const narrowed = candidates.filter(value => {
+      const candidateFirst = splitNameParts(value).first;
+      return candidateFirst && candidateFirst.charAt(0).toLowerCase() === initial;
+    });
+    if (narrowed.length === 1) return narrowed[0];
+  }
+
+  return first ? `${last}, ${first.charAt(0).toUpperCase()}` : last;
+}
+
 function normalizeSetupTeacher(item) {
   return {
     spId:      item.id || item.spId,
@@ -5086,8 +5155,16 @@ const APP = {
   // CONFIG.STUDENT_ROSTER_LIST is ever reset to its placeholder.
   _renderStudentsTab() {
     const students   = SETUP_DATA.students;
-    const teachers    = SETUP_DATA.teachers;
     const sourceList = STUDENT_ROSTER._listName();
+    // Teacher options come from IEP_Users2 (already loaded into
+    // SETUP_DATA.users) — never macwalkthroughwhoareyouvisiting, and never
+    // derived from which names happen to already appear in the roster.
+    // The displayed label is the IEP_Users2 name; the saved value is the
+    // canonical roster Teacher format Daily Pulse/PACE match against.
+    const teacherOptions = SETUP_DATA.users
+      .filter(u => u.active && isTeacherRole(u.role))
+      .map(u => ({ label: u.name, value: resolveCanonicalTeacherValue(u.name, students) }))
+      .sort((a, b) => a.label.localeCompare(b.label));
     const yesNo = ok => ok ? '<span class="badge badge-green">Yes</span>' : '<span class="badge badge-slate">No</span>';
     return `
       <div class="setup-source-bar">
@@ -5113,7 +5190,7 @@ const APP = {
             <label class="form-label">Teacher <span class="req">*</span></label>
             <select class="form-select" id="newStudentTeacher">
               <option value="">— Select teacher —</option>
-              ${teachers.map(t => `<option value="${escHtml(t.name)}">${escHtml(t.name)}</option>`).join("")}
+              ${teacherOptions.map(t => `<option value="${escHtml(t.value)}">${escHtml(t.label)}</option>`).join("")}
             </select>
           </div>
           <div class="form-field">
