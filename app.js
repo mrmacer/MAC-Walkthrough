@@ -540,6 +540,20 @@ function firstDefined(obj, keys, fallback = "") {
   return fallback;
 }
 
+// SharePoint Person fields (Editor/Author) come back from Graph as a lookup
+// object, not a plain string — e.g. {LookupId, LookupValue, Email,
+// DisplayName}, shape not fully confirmed against production. Extracts a
+// usable display name from any of the common shapes; returns "" (never a
+// guess) if the value is missing or has none of them, so a caller can show
+// "not available" instead of "[object Object]" or a fabricated name.
+function personDisplayName(value) {
+  if (value === undefined || value === null) return "";
+  if (typeof value === "object") {
+    return String(value.DisplayName || value.displayName || value.LookupValue || value.Title || value.title || "").trim();
+  }
+  return String(value).trim();
+}
+
 function normalizeBoolean(value) {
   return value === true || value === 1 || value === "1" ||
     String(value).toLowerCase() === "true" || String(value).toLowerCase() === "yes";
@@ -624,7 +638,11 @@ function normalizeSharePointWalkthrough(item) {
     submissionId:         firstDefined(item, ["SubmissionID", "Submission_x0020_ID"]),
     synced:               normalizeBoolean(firstDefined(item, ["Synced"])),
     created:              firstDefined(item, ["Created"]),
-    modified:             firstDefined(item, ["Modified"])
+    modified:             firstDefined(item, ["Modified"]),
+    // Standard SharePoint metadata, not a new column — see personDisplayName().
+    // "" here means the field is genuinely unavailable through this read; the
+    // UI must show "not available", never a fabricated name.
+    modifiedBy:           personDisplayName(firstDefined(item, ["Editor"]))
   };
 }
 
@@ -968,8 +986,15 @@ function renderReportDetailModal(record) {
       ${row("Submission ID", record.submissionId)}
       ${row("SharePoint ID", record.sharePointId)}
       ${tsRow("Created", record.created)}
-      ${tsRow("Modified", record.modified)}
-    </div>`;
+      ${tsRow("Last modified", record.modified)}
+      ${row("Last modified by", record.modifiedBy || "Not available from the current SharePoint read")}
+    </div>
+    ${MAC_ADMIN_PANEL_ALLOWED ? `
+    <div class="detail-section detail-actions">
+      <button type="button" class="btn btn-secondary" id="walkthroughEditBtn">Edit</button>
+    </div>` : ""}`;
+
+  document.getElementById("walkthroughEditBtn")?.addEventListener("click", () => renderWalkthroughEditForm(record));
 
   const modal = document.getElementById("report-detail-modal");
   if (modal) {
@@ -982,6 +1007,145 @@ function closeReportDetailModal() {
   const modal = document.getElementById("report-detail-modal");
   if (modal) modal.classList.add("hidden");
   document.body.style.overflow = "";
+}
+
+/* ── Walkthrough administrative editing ───────────────────────────────────────
+   Corrects an EXISTING IEP_Walkthrough_Observations item via PATCH. Never
+   creates a new item, never touches Observation ID / Session ID /
+   Submission ID / Created / Modified / AI Summary / AI Suggestions, and
+   never exposes or sends Classroom — its historical value is preserved
+   automatically because a PATCH only writes the fields it's given. Entry
+   point is gated on MAC_ADMIN_PANEL_ALLOWED both at the button (rendered
+   only when true) and again here (defense in depth, same pattern the PACE
+   admin page already uses). */
+let _walkthroughEditSaving = false;
+
+function renderWalkthroughEditForm(record) {
+  if (!MAC_ADMIN_PANEL_ALLOWED) return;
+  const body = document.getElementById("report-modal-body");
+  if (!body) return;
+
+  const field = (label, name, value, type = "text") => `
+    <div class="form-field">
+      <label class="form-label" for="we-${name}">${escHtml(label)}</label>
+      <input class="form-input" type="${type}" id="we-${name}" name="${name}" value="${escHtml(value || "")}">
+    </div>`;
+  const textareaField = (label, name, value) => `
+    <div class="form-field">
+      <label class="form-label" for="we-${name}">${escHtml(label)}</label>
+      <textarea class="form-textarea" id="we-${name}" name="${name}" rows="3">${escHtml(value || "")}</textarea>
+    </div>`;
+
+  body.innerHTML = `
+    <form id="walkthroughEditForm" novalidate>
+      <div id="walkthroughEditError" class="pulse-form-error hidden"></div>
+      <div class="detail-section">
+        <div class="detail-section-title">Location</div>
+        ${field("Teacher", "teacher", record.teacher)}
+        ${field("Student", "student", record.student)}
+        ${field("Focus", "focus", record.focus)}
+        ${field("Environment", "environment", record.environment)}
+      </div>
+      <div class="detail-section">
+        <div class="detail-section-title">Observation Data</div>
+        ${field("Engagement", "engagement", record.engagement)}
+        ${field("Supports Observed (comma-separated)", "supportsObserved", (record.supportsObserved || []).join(", "))}
+        ${field("Disengagement Reasons (comma-separated)", "disengagementReasons", (record.disengagementReasons || []).join(", "))}
+        ${field("Support Requested", "supportRequested", record.supportRequested)}
+        <label class="detail-checkbox-row" for="we-followUpNeeded">
+          <input type="checkbox" id="we-followUpNeeded" name="followUpNeeded" ${record.followUpNeeded ? "checked" : ""}>
+          <span>Follow-Up Needed</span>
+        </label>
+      </div>
+      <div class="detail-section">
+        <div class="detail-section-title">Narrative</div>
+        ${textareaField("Observed Win", "observedWin", record.observedWin)}
+        ${textareaField("Concern / Gap", "concernGap", record.concernGap)}
+        ${textareaField("Observation Notes", "observationNotes", record.observationNotes)}
+        ${textareaField("Follow-Up Notes", "followUpNotes", record.followUpNotes)}
+        ${field("Follow-Up Date", "followUpDate", record.followUpDate, "date")}
+        ${field("Priority", "priority", record.priority)}
+      </div>
+      <div class="detail-section detail-actions">
+        <button type="button" class="btn btn-secondary" id="walkthroughEditCancel">Cancel</button>
+        <button type="submit" class="btn btn-primary" id="walkthroughEditSave">Save Changes</button>
+      </div>
+    </form>`;
+
+  // Cancel performs zero Graph writes — just re-render the unmodified,
+  // already-loaded record.
+  document.getElementById("walkthroughEditCancel").addEventListener("click", () => {
+    renderReportDetailModal(record);
+  });
+  document.getElementById("walkthroughEditForm").addEventListener("submit", e => {
+    e.preventDefault();
+    saveWalkthroughEdit(record, e.target);
+  });
+}
+
+async function saveWalkthroughEdit(record, formEl) {
+  if (_walkthroughEditSaving) return;
+  if (!MAC_ADMIN_PANEL_ALLOWED) return;
+
+  const errorEl = document.getElementById("walkthroughEditError");
+  if (errorEl) { errorEl.classList.add("hidden"); errorEl.textContent = ""; }
+
+  const fd  = new FormData(formEl);
+  const val = name => (fd.get(name) || "").toString().trim();
+
+  // Classroom is intentionally never included — its historical value is
+  // preserved because a PATCH only writes fields present in this payload.
+  // Observation ID / Session ID / Submission ID / Created / Modified /
+  // AI Summary / AI Suggestions are likewise never sent — not editable.
+  const displayFields = {
+    "Teacher":              val("teacher"),
+    "Student":              val("student"),
+    "Focus":                val("focus"),
+    "Environment":          val("environment"),
+    "Engagement":           val("engagement"),
+    "SupportObserved":      val("supportsObserved"),
+    "DisengagementReasons": val("disengagementReasons"),
+    "SupportRequested":     val("supportRequested"),
+    "Observed Win":         val("observedWin"),
+    "Concern / Gap":        val("concernGap"),
+    "Observation Notes":    val("observationNotes"),
+    "Follow-Up Notes":      val("followUpNotes"),
+    "Follow-Up Date":       val("followUpDate"),
+    "Priority":             val("priority"),
+    "Follow-Up Needed":     fd.get("followUpNeeded") === "on"
+  };
+
+  _walkthroughEditSaving = true;
+  const saveBtn   = document.getElementById("walkthroughEditSave");
+  const cancelBtn = document.getElementById("walkthroughEditCancel");
+  if (saveBtn)   { saveBtn.disabled = true; saveBtn.textContent = "Saving…"; }
+  if (cancelBtn) cancelBtn.disabled = true;
+
+  try {
+    await GRAPH.updateWalkthrough(record.sharePointId, displayFields);
+    showToast("Walkthrough updated.");
+    // Refresh from live SharePoint rather than assuming the save worked —
+    // also keeps the Reports list/filters behind the modal in sync.
+    REPORTS.rawWalkthroughs = [];
+    REPORTS.walkthroughs    = [];
+    await REPORTS.load();
+    const refreshed = REPORTS.walkthroughs.find(r => String(r.sharePointId) === String(record.sharePointId));
+    renderReportDetailModal(refreshed || record);
+  } catch (err) {
+    console.error("Walkthrough edit save failed:", err.message || String(err));
+    if (errorEl) {
+      errorEl.textContent = "Save failed: " + (err.message || String(err));
+      errorEl.classList.remove("hidden");
+    } else {
+      showToast("Save failed: " + (err.message || String(err)), "error");
+    }
+  } finally {
+    _walkthroughEditSaving = false;
+    const btn  = document.getElementById("walkthroughEditSave");
+    const cbtn = document.getElementById("walkthroughEditCancel");
+    if (btn)  { btn.disabled = false; btn.textContent = "Save Changes"; }
+    if (cbtn) cbtn.disabled = false;
+  }
 }
 
 function exportReportsCsv() {
@@ -3382,11 +3546,18 @@ const APP = {
     );
   },
 
+  // Visit id currently open in edit mode inside the student-history modal
+  // (null = none). Only ever one visit editable at a time.
+  _paceEditingVisitId: null,
+  _paceEditSaving:     false,
+  _paceHistoryStudent: null,
+
   _openPaceStudentHistory(student) {
     if (!AUTH.isAdmin || USER_CONTEXT.isViewingAsTeacher || !this._paceAdminData) return;
     const modal = document.getElementById("pace-history-modal");
     const body  = document.getElementById("pace-history-body");
     if (!modal || !body) return;
+    this._paceHistoryStudent = student;
     const today = new Date().toISOString().slice(0, 10);
     const history = PACE_ADMIN.studentHistory(this._paceAdminData.visits, student, today);
     const availability = this._paceAdminData.availability;
@@ -3420,6 +3591,29 @@ const APP = {
         : `<div class="empty-state"><p>No completed visits in this period.</p></div>`}`;
     document.getElementById("pace-history-title").textContent = `${student} — PACE History`;
     modal.classList.remove("hidden");
+
+    body.querySelectorAll(".pace-visit-edit-btn").forEach(btn => {
+      btn.addEventListener("click", e => {
+        e.preventDefault();
+        this._paceEditingVisitId = btn.dataset.visitId;
+        this._openPaceStudentHistory(this._paceHistoryStudent);
+      });
+    });
+    body.querySelectorAll(".pace-visit-edit-cancel").forEach(btn => {
+      // Cancel performs zero Graph writes — just re-render the read-only view.
+      btn.addEventListener("click", e => {
+        e.preventDefault();
+        this._paceEditingVisitId = null;
+        this._openPaceStudentHistory(this._paceHistoryStudent);
+      });
+    });
+    body.querySelectorAll(".pace-visit-edit-form").forEach(form => {
+      form.addEventListener("submit", e => {
+        e.preventDefault();
+        const visit = this._paceAdminData.visits.find(v => v.id === form.dataset.visitId);
+        if (visit) this._savePaceVisitEdit(visit, form);
+      });
+    });
   },
 
   // One expandable "Recent Visits" row: a compact summary line (the
@@ -3436,8 +3630,10 @@ const APP = {
       ? `<span class="pace-record-badge${visit.date === today ? " pace-badge-open-now" : ""}">${visit.date === today ? "Currently in PACE" : "Open / incomplete"}</span>`
       : "";
 
+    const isEditing = this._paceEditingVisitId === visit.id;
+
     return `
-      <details class="pace-visit-row">
+      <details class="pace-visit-row"${isEditing ? " open" : ""}>
         <summary class="pace-visit-summary">
           <span class="pace-visit-summary-date">${escHtml(dateLabel)}</span>
           <span class="pace-visit-summary-duration">${visit.durationMinutes !== null ? `${visit.durationMinutes} min` : (visit.isCompleted ? "—" : "In progress")}</span>
@@ -3449,7 +3645,7 @@ const APP = {
             <span class="pace-visit-summary-toggle-open">Hide Details</span>
           </span>
         </summary>
-        ${this._paceVisitDetailHtml(visit, availability)}
+        ${isEditing ? this._paceVisitEditFormHtml(visit, availability) : this._paceVisitDetailHtml(visit, availability)}
       </details>`;
   },
 
@@ -3499,7 +3695,165 @@ const APP = {
             ? `<div class="pace-visit-notes-text">${escHtml(visit.notes)}</div>`
             : `<p class="pace-visit-notes-empty">No notes recorded.</p>`}
         </div>
+        <div class="pace-detail-field" style="margin-top:14px">
+          <span>Last modified</span>
+          <strong>${escHtml(visit.modified ? fmtDateTime(visit.modified) : "Not available")}${visit.modifiedBy ? " by " + escHtml(visit.modifiedBy) : ""}</strong>
+        </div>
+        ${MAC_ADMIN_PANEL_ALLOWED ? `
+        <div class="detail-actions" style="margin-top:12px">
+          <button type="button" class="btn btn-secondary btn-sm pace-visit-edit-btn" data-visit-id="${escHtml(visit.id)}">Edit</button>
+        </div>` : ""}
       </div>`;
+  },
+
+  /* ── PACE administrative editing ───────────────────────────────────────────
+     Corrects an EXISTING IEP_Pace_Visits item via PATCH. Never creates a new
+     visit. Uses ONLY the confirmed-live display names already established in
+     pace-admin.js's FIELD_ALIASES (Room/Reason/Intervention Used/Behavior
+     Specialist/Teacher Came From/SCM Used) — never the stale legacy
+     "Behavior"/"Interventions" names GRAPH.savePaceVisit() still uses for
+     its own unrelated (unreachable) write path. Duration is never a direct
+     input — it's recalculated from Time In/Time Out via
+     PACE_ADMIN.calculateDuration() only when one of those actually changes,
+     and Time In/Time Out are only ever included in the PATCH when the
+     administrator actually changed them, so an open visit can never be
+     completed just by editing an unrelated field and saving. */
+  _paceVisitEditFormHtml(visit, availability) {
+    const room = PACE_ADMIN.roomInfo(visit.paceRoom);
+    const knownRooms = Object.entries(PACE_ADMIN.ROOM_INFO).map(([, info]) => info.label);
+    const roomOptions = [...new Set([...knownRooms, ...(visit.paceRoom ? [visit.paceRoom] : [])])];
+
+    const field = (label, name, value, type = "text") => `
+      <div class="form-field">
+        <label class="form-label" for="pe-${name}">${escHtml(label)}</label>
+        <input class="form-input" type="${type}" id="pe-${name}" name="${name}" value="${escHtml(value || "")}">
+      </div>`;
+
+    return `
+      <div class="pace-visit-details">
+        <form class="pace-visit-edit-form" data-visit-id="${escHtml(visit.id)}">
+          <div id="pe-error-${escHtml(visit.id)}" class="pulse-form-error hidden"></div>
+          <div class="pace-detail-grid">
+            ${field("Student", "student", visit.student)}
+            ${availability.paceRoom ? `
+            <div class="form-field">
+              <label class="form-label" for="pe-paceRoom">PACE Room</label>
+              <select class="form-select" id="pe-paceRoom" name="paceRoom">
+                <option value="">— Not recorded —</option>
+                ${roomOptions.map(r => `<option value="${escHtml(r)}"${visit.paceRoom === r ? " selected" : ""}>${escHtml(r)}</option>`).join("")}
+              </select>
+            </div>` : ""}
+            ${field("Time In", "timeIn", visit.timeIn, "time")}
+            ${field("Time Out", "timeOut", visit.timeOut, "time")}
+            ${availability.teacherCameFrom ? field("Teacher Came From", "teacherCameFrom", visit.teacherCameFrom) : ""}
+            ${availability.scm ? `
+            <div class="form-field">
+              <label class="form-label" for="pe-scm">SCM</label>
+              <select class="form-select" id="pe-scm" name="scm">
+                <option value=""${visit.scmUsed === null ? " selected" : ""}>— Not recorded —</option>
+                <option value="yes"${visit.scmUsed === true ? " selected" : ""}>Yes</option>
+                <option value="no"${visit.scmUsed === false ? " selected" : ""}>No</option>
+              </select>
+            </div>` : ""}
+          </div>
+          ${field("Reason(s) (comma-separated)", "reasons", visit.reasons.join(", "))}
+          ${field("Support / Intervention (comma-separated)", "supports", visit.supports.join(", "))}
+          ${availability.specialist ? field("Behavior Specialist(s) (comma-separated)", "specialists", visit.specialists.join(", ")) : ""}
+          <div class="form-field">
+            <label class="form-label" for="pe-notes">Notes</label>
+            <textarea class="form-textarea" id="pe-notes" name="notes" rows="4">${escHtml(visit.notes || "")}</textarea>
+          </div>
+          <p style="font-size:11.5px;color:var(--text-muted);margin:0 0 10px">
+            Duration is calculated automatically from Time In / Time Out and can't be edited directly.
+            ${!visit.isCompleted ? "Leave Time Out blank to keep this visit open." : ""}
+          </p>
+          <div class="detail-actions">
+            <button type="button" class="btn btn-secondary pace-visit-edit-cancel">Cancel</button>
+            <button type="submit" class="btn btn-primary pace-visit-edit-save">Save Changes</button>
+          </div>
+        </form>
+      </div>`;
+  },
+
+  async _savePaceVisitEdit(visit, formEl) {
+    if (this._paceEditSaving) return;
+    if (!MAC_ADMIN_PANEL_ALLOWED) return;
+
+    const errorEl = document.getElementById(`pe-error-${visit.id}`);
+    if (errorEl) { errorEl.classList.add("hidden"); errorEl.textContent = ""; }
+
+    const fd  = new FormData(formEl);
+    const val = name => (fd.get(name) || "").toString().trim();
+    const listVal = name => val(name).split(",").map(v => v.trim()).filter(Boolean);
+
+    const newTimeIn  = val("timeIn");
+    const newTimeOut = val("timeOut");
+    const timeInChanged  = newTimeIn  !== (visit.timeIn  || "");
+    const timeOutChanged = newTimeOut !== (visit.timeOut || "");
+
+    // Every other field is always sent as the form's current value — same
+    // pattern as the walkthrough editor. Time In/Time Out are the one
+    // exception: only included when actually changed, so an open visit is
+    // never accidentally completed (or a completed one reopened) merely by
+    // editing and saving an unrelated field.
+    const displayFields = {
+      "Student":  val("student"),
+      "Reason":   listVal("reasons").join(", "),
+      "Intervention Used": listVal("supports").join(", "),
+      "Notes":    val("notes")
+    };
+    if (formEl.elements["paceRoom"])        displayFields["Room"] = val("paceRoom");
+    if (formEl.elements["teacherCameFrom"]) displayFields["Teacher Came From"] = val("teacherCameFrom");
+    if (formEl.elements["specialists"])     displayFields["Behavior Specialist"] = listVal("specialists").join(", ");
+    if (formEl.elements["scm"]) {
+      const scmVal = val("scm");
+      if (scmVal === "yes") displayFields["SCM Used"] = true;
+      else if (scmVal === "no") displayFields["SCM Used"] = false;
+      // blank ("— Not recorded —") omits "SCM Used" entirely — never sent
+      // as a fabricated false.
+    }
+    if (timeInChanged)  displayFields["Time In"]  = newTimeIn;
+    if (timeOutChanged) displayFields["Time Out"] = newTimeOut;
+    if (timeInChanged || timeOutChanged) {
+      const effectiveTimeIn  = timeInChanged  ? newTimeIn  : visit.timeIn;
+      const effectiveTimeOut = timeOutChanged ? newTimeOut : visit.timeOut;
+      const recalculated = PACE_ADMIN.calculateDuration(effectiveTimeIn, effectiveTimeOut);
+      // GRAPH.mapFields() silently drops null/undefined values (shared
+      // behavior, not something to change here) — a still-open visit (no
+      // Time Out yet) simply omits Duration rather than sending a no-op null.
+      if (recalculated !== null) displayFields["Duration"] = recalculated;
+    }
+
+    this._paceEditSaving = true;
+    const saveBtn   = formEl.querySelector(".pace-visit-edit-save");
+    const cancelBtn = formEl.querySelector(".pace-visit-edit-cancel");
+    if (saveBtn)   { saveBtn.disabled = true; saveBtn.textContent = "Saving…"; }
+    if (cancelBtn) cancelBtn.disabled = true;
+
+    try {
+      await GRAPH.updatePaceVisit(visit.id, displayFields);
+      showToast("PACE visit updated.");
+      // Refresh from live SharePoint rather than assuming the save worked —
+      // also keeps the #pace results table/summary in sync.
+      this._paceAdminData = await PACE_ADMIN.load(true);
+      this._paceEditingVisitId = null;
+      this._openPaceStudentHistory(this._paceHistoryStudent);
+      if (this.currentPage === "pace") this._renderPaceAdminResults();
+    } catch (err) {
+      console.error("PACE visit edit save failed:", err.message || String(err));
+      if (errorEl) {
+        errorEl.textContent = "Save failed: " + (err.message || String(err));
+        errorEl.classList.remove("hidden");
+      } else {
+        showToast("Save failed: " + (err.message || String(err)), "error");
+      }
+    } finally {
+      this._paceEditSaving = false;
+      const btn  = formEl.querySelector(".pace-visit-edit-save");
+      const cbtn = formEl.querySelector(".pace-visit-edit-cancel");
+      if (btn)  { btn.disabled = false; btn.textContent = "Save Changes"; }
+      if (cbtn) cbtn.disabled = false;
+    }
   },
 
   // Legacy operational form retained as an internal rollback path only. The
@@ -4239,35 +4593,23 @@ const APP = {
     }
     const records      = DB.getRecords();
     const pulses       = DB.getDailyPulses();
-    const studentChecks = DB.getStudentChecks();
     const teachers     = DB.getTeachers();
     const classrooms   = DB.getClassrooms();
     const weekRecords  = DB.getRecordsThisWeek();
 
     // ── User context ──
     const user = this.getCurrentUser();
-    const currentStudents = user.isAdmin
-      ? PILOT_STUDENTS
-      : PILOT_STUDENTS.filter(s => s.teacherId === user.id);
     const filteredPulses  = user.isAdmin ? pulses : pulses.filter(p => {
       const ps = PILOT_STUDENTS.find(s => s.name === p.student);
       return ps?.teacherId === user.id;
     });
     const filteredRecords = user.isAdmin ? records : records.filter(r => r.responses.teacherId === user.id);
-    // PACE dashboard data is populated from IEP_Pace_Visits below. Never use
-    // the legacy local operational cache as an analytics source.
-    const filteredPaceLogs = [];
-    const filteredChecks = user.isAdmin ? studentChecks : studentChecks.filter(c => {
-      const ps = PILOT_STUDENTS.find(s => s.id === c.studentId);
-      return ps?.teacherId === user.id;
-    });
 
     // ── Walkthrough stats ──
     const followUp     = filteredRecords.filter(r => r.responses.supportNeeded !== "none");
     const helpSoon     = filteredRecords.filter(r => r.responses.supportNeeded === "help-soon");
     const urgent       = filteredRecords.filter(r => r.responses.supportNeeded === "urgent");
     const teacherIds   = new Set(filteredRecords.map(r => r.responses.teacherId).filter(Boolean));
-    const classroomIds = new Set(filteredRecords.map(r => r.responses.classroomId).filter(Boolean));
 
     const statusCounts = { "on-track":0, "monitor":0, "needs-support":0, "immediate-follow-up":0 };
     filteredRecords.forEach(r => { if (statusCounts[r.responses.classroomStatus] !== undefined) statusCounts[r.responses.classroomStatus]++; });
@@ -4285,115 +4627,15 @@ const APP = {
         .filter(p => p.timestamp.slice(0,10) === today && (p.pulseStatus === "struggles" || p.pulseStatus === "concern"))
         .map(p => p.student)
     );
+    // Walkthrough-only support-request count. Daily Pulse's old "Support
+    // Level" contribution was removed: the current Daily Pulse app never
+    // writes that field, so it was always adding a dead 0 here — see the
+    // live-refresh block below for the matching SharePoint-sourced version.
     const walkSupportReqs  = filteredRecords.filter(r => r.responses.supportNeeded && r.responses.supportNeeded !== "none").length;
-    const pulseSupportReqs = filteredPulses.filter(p => p.supportLevel === "talk-weekly" || p.supportLevel === "need-help-now").length;
 
     const categoryCounts = {};
     filteredPulses.forEach(p => { (p.categories||[]).forEach(c => { categoryCounts[c]=(categoryCounts[c]||0)+1; }); });
     const topCategory = Object.entries(categoryCounts).sort((a,b)=>b[1]-a[1])[0];
-
-    // PACE analytics render asynchronously from SharePoint after the local
-    // dashboard shell; no PACE metric is derived from localStorage here.
-    const paceBehaviorCounts = {};
-    const topPaceIntervention = null;
-
-    // ── Student Check-In stats ──
-    const checkToday        = filteredChecks.filter(c => c.date === today);
-    const checkinsToday     = checkToday.filter(c => c.type === "check-in").length;
-    const checkoutsToday    = checkToday.filter(c => c.type === "check-out").length;
-    const hardMorningsToday = checkToday.filter(c => c.status === "hard-morning").length;
-    const roughEndingsToday = checkToday.filter(c => c.status === "rough-day").length;
-    const recentChecks      = [...filteredChecks].sort((a,b)=>new Date(b.timestamp)-new Date(a.timestamp)).slice(0,10);
-    const selfReportCounts  = {};
-    filteredChecks.forEach(c => { if (c.statusLabel) selfReportCounts[c.statusLabel]=(selfReportCounts[c.statusLabel]||0)+1; });
-    const topSelfReport     = Object.entries(selfReportCounts).sort((a,b)=>b[1]-a[1])[0];
-    const hardMorningsByStudent = {};
-    filteredChecks.filter(c => c.status === "hard-morning")
-      .forEach(c => { hardMorningsByStudent[c.studentName]=(hardMorningsByStudent[c.studentName]||0)+1; });
-    const repeatedHardMornings = Object.entries(hardMorningsByStudent)
-      .filter(([,n])=>n>=2).sort((a,b)=>b[1]-a[1]).slice(0,3);
-
-    // ── Student Pulse Trends (last 10 days, newest first) ──
-    const dotColors = { great:"#16a34a", struggles:"#ca8a04", concern:"#dc2626" };
-    const dotLabels = { great:"Great Day", struggles:"Some Struggles", concern:"Significant Concern" };
-    const studentTrends = currentStudents.map(ps => {
-      const entries = [...filteredPulses.filter(p => p.student === ps.name)]
-        .sort((a,b) => new Date(b.timestamp) - new Date(a.timestamp))
-        .slice(0,10);
-      return { student: ps.name, teacherName: ps.teacherName, entries };
-    }).filter(s => s.entries.length > 0);
-
-    // ── Convergence Engine (pulse + PACE + check-in signals per student) ──
-    const convergenceData = currentStudents.map(ps => {
-      const pulseEntries = [...filteredPulses.filter(p => p.student === ps.name)]
-        .sort((a,b) => new Date(b.timestamp) - new Date(a.timestamp))
-        .slice(0,7);
-      const paceEntries  = [...filteredPaceLogs.filter(p => p.studentId === ps.id)]
-        .sort((a,b) => new Date(b.timestamp) - new Date(a.timestamp))
-        .slice(0,7);
-      const checkEntries = [...filteredChecks.filter(c => c.studentId === ps.id)]
-        .sort((a,b) => new Date(b.timestamp) - new Date(a.timestamp))
-        .slice(0,7);
-      if (pulseEntries.length === 0 && paceEntries.length === 0 && checkEntries.length === 0) return null;
-
-      let green = 0, yellow = 0, red = 0;
-      pulseEntries.forEach(e => {
-        if      (e.pulseStatus === "great")    green++;
-        else if (e.pulseStatus === "struggles") yellow++;
-        else if (e.pulseStatus === "concern")   red++;
-      });
-      const hasElevated      = paceEntries.some(p =>
-        (p.behaviors||[]).some(b => CONFIG.PACE_ELEVATED_BEHAVIORS.includes(b))
-      );
-      const paceCount        = paceEntries.length;
-      const checkRedCount    = checkEntries.filter(c => ["hard-morning","rough-day"].includes(c.status)).length;
-      const checkConcernCount = checkEntries.filter(c => ["hard-morning","rough-day","not-sure","same"].includes(c.status)).length;
-
-      const adultSignals = (yellow + red) + (paceCount >= 1 ? 1 : 0);
-      let label = "stable";
-      if ((yellow + red) >= 3 || (paceCount >= 3 && (yellow + red) >= 1) || (hasElevated && red >= 1) ||
-          (checkRedCount >= 3 && adultSignals >= 1)) {
-        label = "escalating";
-      } else if (yellow >= 2 || paceCount >= 1 || hasElevated || checkConcernCount >= 2) {
-        label = "watch";
-      }
-      return { student: ps.name, teacherName: ps.teacherName, green, yellow, red, total: pulseEntries.length, paceCount, checkRedCount, checkConcernCount, label };
-    }).filter(Boolean);
-
-    // ── Emerging Patterns (category frequency per student) ──
-    const patternData = currentStudents.map(ps => {
-      const entries = filteredPulses.filter(p => p.student === ps.name);
-      if (entries.length === 0) return null;
-      const counts = {};
-      entries.forEach(e => { (e.categories||[]).forEach(c => { counts[c]=(counts[c]||0)+1; }); });
-      const sorted = Object.entries(counts).sort((a,b)=>b[1]-a[1]);
-      if (sorted.length === 0) return null;
-      return { student: ps.name, teacherName: ps.teacherName, topCategories: sorted.slice(0,3), topLabel: sorted[0][0] };
-    }).filter(Boolean);
-
-    // ── Merged Help Requests ──
-    const helpRequests = [];
-    filteredRecords.forEach(r => {
-      const sn = r.responses.supportNeeded;
-      if (!sn || sn === "none") return;
-      const t = teachers.find(x => x.id === r.responses.teacherId);
-      let urgency, label;
-      if      (sn === "urgent")         { urgency = 3; label = "Need Help Now"; }
-      else if (sn === "help-soon")      { urgency = 2; label = "Need Help Now"; }
-      else if (sn === "talk-at-weekly") { urgency = 1; label = "Let's Talk"; }
-      else return;
-      helpRequests.push({ who: t ? t.name : "Unknown Teacher", source: "Walkthrough", urgency, label, ts: r.submittedAt });
-    });
-    filteredPulses.forEach(p => {
-      if (!p.supportLevel || p.supportLevel === "got-it") return;
-      let urgency, label;
-      if      (p.supportLevel === "need-help-now") { urgency = 3; label = "Need Help Now"; }
-      else if (p.supportLevel === "talk-weekly")   { urgency = 1; label = "Let's Talk"; }
-      else return;
-      helpRequests.push({ who: p.student, source: "Daily Pulse", urgency, label, ts: p.timestamp });
-    });
-    helpRequests.sort((a,b) => b.urgency - a.urgency || new Date(b.ts) - new Date(a.ts));
-    const recentHelp = helpRequests.slice(0,10);
 
     el.innerHTML = `
       <div class="info-banner">
@@ -4417,11 +4659,6 @@ const APP = {
           <div class="stat-label">Teachers Visited</div>
           <div class="stat-value" id="d-walk-teachers">${teacherIds.size}</div>
           <div class="stat-sub">of ${teachers.length} in setup</div>
-        </div>
-        <div class="stat-card accent-green">
-          <div class="stat-label">Classrooms Visited</div>
-          <div class="stat-value" id="d-walk-classrooms">${classroomIds.size}</div>
-          <div class="stat-sub">of ${classrooms.length} in setup</div>
         </div>
         <div class="stat-card accent-orange">
           <div class="stat-label">Follow-Up Opportunities</div>
@@ -4452,9 +4689,9 @@ const APP = {
           <div class="stat-sub">Struggles or concern</div>
         </div>
         <div class="stat-card accent-red">
-          <div class="stat-label">Support Requests</div>
-          <div class="stat-value" id="d-pulse-support">${walkSupportReqs + pulseSupportReqs}</div>
-          <div class="stat-sub">Walkthroughs + pulses</div>
+          <div class="stat-label">Walkthrough Support Requests</div>
+          <div class="stat-value" id="d-pulse-support">${walkSupportReqs}</div>
+          <div class="stat-sub">Any support flag on a walkthrough</div>
         </div>
         <div class="stat-card accent-green">
           <div class="stat-label">Most Common Concern</div>
@@ -4486,150 +4723,11 @@ const APP = {
         </div>
       </div>
 
-      <div class="stat-grid">
-        <div class="stat-card accent-green">
-          <div class="stat-label">Student Check-Ins Today</div>
-          <div class="stat-value">${checkinsToday}</div>
-          <div class="stat-sub">Morning check-ins</div>
-        </div>
-        <div class="stat-card accent-blue">
-          <div class="stat-label">Check-Outs Today</div>
-          <div class="stat-value">${checkoutsToday}</div>
-          <div class="stat-sub">End-of-day check-outs</div>
-        </div>
-        <div class="stat-card accent-orange">
-          <div class="stat-label">Hard Mornings Today</div>
-          <div class="stat-value">${hardMorningsToday}</div>
-          <div class="stat-sub">Self-reported today</div>
-        </div>
-        <div class="stat-card accent-red">
-          <div class="stat-label">Rough Endings Today</div>
-          <div class="stat-value">${roughEndingsToday}</div>
-          <div class="stat-sub">Self-reported today</div>
-        </div>
-      </div>
-
-      <!-- Student Pulse Trends -->
-      <div class="card" style="margin-bottom:20px">
-        <div class="card-title">Student Pulse Trends</div>
-        ${studentTrends.length === 0
-          ? `<div class="empty-state"><div class="empty-icon">💚</div><p>No daily pulse entries yet. <a href="#pulse" style="color:var(--color-primary)">Record the first one.</a></p></div>`
-          : studentTrends.map(s => `
-              <div class="student-trend-card">
-                <div class="student-trend-name">${escHtml(s.student)}${user.isAdmin ? `<span class="trend-teacher"> — ${escHtml(s.teacherName)}</span>` : ""}</div>
-                <div style="font-size:11.5px;color:var(--text-muted);margin-bottom:6px">Last ${s.entries.length} Day${s.entries.length !== 1 ? "s" : ""}</div>
-                <div class="pulse-strip">
-                  ${s.entries.map(e => `<span class="pulse-dot" style="background:${dotColors[e.pulseStatus]||"#94a3b8"}" title="${escHtml(dotLabels[e.pulseStatus]||"")} — ${fmtDateShort(e.timestamp)}"></span>`).join("")}
-                </div>
-              </div>`).join("")}
-      </div>
-
-      <!-- Convergence Engine -->
-      <div class="card" style="margin-bottom:20px">
-        <div class="card-title">Convergence Engine</div>
-        ${convergenceData.length === 0
-          ? `<div class="empty-state"><div class="empty-icon">📊</div><p>No data yet. Record daily pulses to see convergence signals.</p></div>`
-          : `<div class="convergence-grid">${convergenceData.map(s => `
-              <div class="convergence-item">
-                <div>
-                  <div class="convergence-student">${escHtml(s.student)}${user.isAdmin ? `<span class="trend-teacher"> — ${escHtml(s.teacherName)}</span>` : ""}</div>
-                  <div class="convergence-counts">🟢 ${s.green} &nbsp;🟡 ${s.yellow} &nbsp;🔴 ${s.red}${s.paceCount > 0 ? ` &nbsp;<span class="convergence-pace-signal">📋 ×${s.paceCount}</span>` : ""}${s.checkConcernCount > 0 ? ` &nbsp;<span class="convergence-check-signal">💬 ×${s.checkConcernCount}</span>` : ""} <span style="color:var(--text-muted);margin-left:4px">last ${s.total}</span></div>
-                </div>
-                <span class="convergence-badge ${s.label}">${s.label === "escalating" ? "Escalating" : s.label === "watch" ? "Watch" : "Stable"}</span>
-              </div>`).join("")}</div>`}
-      </div>
-
-      <!-- Emerging Patterns -->
-      <div class="card" style="margin-bottom:20px">
-        <div class="card-title">Emerging Patterns</div>
-        ${patternData.length === 0 && filteredPaceLogs.length === 0 && filteredChecks.length === 0
-          ? `<div class="empty-state"><div class="empty-icon">🔍</div><p>No category patterns detected yet.</p></div>`
-          : `${patternData.map(p => `
-              <div class="pattern-item">
-                <div class="pattern-student">${escHtml(p.student)}${user.isAdmin ? `<span class="trend-teacher"> — ${escHtml(p.teacherName)}</span>` : ""}</div>
-                <div class="pattern-detail">
-                  ${p.topCategories.map(([cat,cnt]) => `<div>${escHtml(cat)}: <strong>${cnt}</strong></div>`).join("")}
-                  <div class="pattern-top">Most Frequent: <strong>${escHtml(p.topLabel)}</strong></div>
-                </div>
-              </div>`).join("")}
-            ${filteredPaceLogs.length > 0 ? `
-              <div class="pace-patterns">
-                <div class="pace-patterns-label">PACE Behavior Patterns</div>
-                <div class="pace-patterns-grid">
-                  ${Object.entries(paceBehaviorCounts).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([b,n]) =>
-                    `<div class="pace-pattern-row"><span class="pace-pattern-name">${escHtml(b)}</span><span class="pace-pattern-count">${n}</span></div>`
-                  ).join("")}
-                </div>
-                ${topPaceIntervention ? `
-                  <div class="pace-patterns-label" style="margin-top:12px">Most Used Intervention</div>
-                  <div class="pace-pattern-row"><span class="pace-pattern-name">${escHtml(topPaceIntervention[0])}</span><span class="pace-pattern-count">${topPaceIntervention[1]}</span></div>
-                ` : ""}
-              </div>` : ""}
-            ${filteredChecks.length > 0 ? `
-              <div class="pace-patterns">
-                <div class="pace-patterns-label">Student Self-Report Patterns</div>
-                ${topSelfReport ? `
-                  <div class="pace-patterns-label" style="margin-bottom:4px;font-size:10.5px">Most Frequent</div>
-                  <div class="pace-pattern-row"><span class="pace-pattern-name">${escHtml(topSelfReport[0])}</span><span class="pace-pattern-count">${topSelfReport[1]}</span></div>
-                ` : ""}
-                ${repeatedHardMornings.length > 0 ? `
-                  <div class="pace-patterns-label" style="margin-top:10px">Repeated Hard Mornings (2+)</div>
-                  <div class="pace-patterns-grid">
-                    ${repeatedHardMornings.map(([name,n]) =>
-                      `<div class="pace-pattern-row"><span class="pace-pattern-name">${escHtml(name)}</span><span class="pace-pattern-count">${n}×</span></div>`
-                    ).join("")}
-                  </div>
-                ` : ""}
-              </div>` : ""}
-          `}
-      </div>
-
       <!-- PACE Room Activity -->
       <div class="card" style="margin-bottom:20px">
         <div class="card-title">PACE Activity <a href="#pace" class="pace-card-link">Explore visits →</a></div>
         <div id="d-pace-flags"></div>
         <div id="d-pace-activity"><div class="reports-loading"><span class="spinner"></span> Loading completed visits…</div></div>
-      </div>
-
-      <!-- Student Voice Check-Ins -->
-      <div class="card" style="margin-bottom:20px">
-        <div class="card-title">Student Voice Check-Ins</div>
-        ${recentChecks.length === 0
-          ? `<div class="empty-state"><div class="empty-icon">💬</div><p>No student check-ins yet. <a href="#checkin" style="color:var(--color-primary)">Record the first one.</a></p></div>`
-          : `<ul class="recent-list">${recentChecks.map(c => {
-              const isCheckin = c.type === "check-in";
-              const colorMap  = { "ready":"#16a34a","better-good":"#16a34a","not-sure":"#ca8a04","same":"#ca8a04","hard-morning":"#dc2626","rough-day":"#dc2626" };
-              const dotColor  = colorMap[c.status] || "#94a3b8";
-              const typeLabel = isCheckin ? "Student Check-In" : "Student Check-Out";
-              return `<li class="recent-item">
-                <div class="recent-dot" style="background:${dotColor}"></div>
-                <div class="recent-meta">
-                  <div class="recent-who">${escHtml(c.studentName)}${user.isAdmin && c.teacherName ? `<span class="trend-teacher"> — ${escHtml(c.teacherName)}</span>` : ""}</div>
-                  <div class="recent-when">${escHtml(typeLabel)} · ${escHtml(c.statusLabel)} · ${fmtDateTime(c.timestamp)}</div>
-                  ${c.note ? `<div style="font-size:12px;color:var(--text-secondary);margin-top:2px;font-style:italic">"${escHtml(c.note)}"</div>` : ""}
-                </div>
-              </li>`;
-            }).join("")}</ul>`}
-      </div>
-
-      <!-- Help Requests (merged) -->
-      <div class="card" style="margin-bottom:20px">
-        <div class="card-title">Help Requests</div>
-        ${recentHelp.length === 0
-          ? `<div class="empty-state"><div class="empty-icon">🙌</div><p>No active help requests.</p></div>`
-          : `<ul class="recent-list">${recentHelp.map(r => {
-              const urgencyColor  = r.urgency >= 3 ? "var(--red)" : "var(--blue)";
-              const urgencyBg     = r.urgency >= 3 ? "var(--red-bg)" : "var(--blue-bg)";
-              const urgencyBorder = r.urgency >= 3 ? "var(--red-border)" : "var(--blue-border)";
-              return `<li class="recent-item">
-                <div class="recent-dot" style="background:${urgencyColor}"></div>
-                <div class="recent-meta">
-                  <div class="recent-who">${escHtml(r.who)}</div>
-                  <div class="recent-when">${fmtDateTime(r.ts)} · ${escHtml(r.source)}</div>
-                </div>
-                <span class="badge" style="background:${urgencyBg};color:${urgencyColor};border:1px solid ${urgencyBorder};font-size:11.5px;white-space:nowrap">${escHtml(r.label)}</span>
-              </li>`;
-            }).join("")}</ul>`}
       </div>
 
       <div class="dash-grid">
@@ -4686,14 +4784,15 @@ const APP = {
         upd("d-walk-total",      sp.walk.total);
         upd("d-walk-week",       sp.walk.thisWeek);
         upd("d-walk-teachers",   sp.walk.teacherCount);
-        upd("d-walk-classrooms", sp.walk.classroomCount);
         upd("d-walk-followups",  sp.walk.followUps);
         upd("d-walk-helpsoon",   sp.walk.helpSoon);
         upd("d-walk-urgent",     sp.walk.urgent);
 
         upd("d-pulse-total",     sp.pulse.total);
         upd("d-pulse-flagged",   sp.pulse.flaggedToday);
-        upd("d-pulse-support",   sp.walk.followUps + sp.pulse.pulseSupportReqs);
+        // Walkthrough-only — Daily Pulse's "Support Level" contribution was
+        // removed (that field is never written by the current Daily Pulse app).
+        upd("d-pulse-support",   sp.walk.followUps);
         upd("d-pulse-concern",   sp.pulse.topCategory ? sp.pulse.topCategory[0] : "—");
         if (sp.pulse.topCategory) {
           const n    = sp.pulse.topCategory[1];

@@ -60,7 +60,6 @@ const DashboardSync = {
     const helpSoon     = items.filter(i => (i["SupportRequested"] || "") === "help-soon");
     const urgent       = items.filter(i => (i["SupportRequested"] || "") === "urgent");
     const teacherSet   = new Set(items.map(i => i["Teacher"]).filter(Boolean));
-    const classroomSet = new Set(items.map(i => i["Classroom"]).filter(Boolean));
 
     const supportCounts = {};
     items.forEach(i => {
@@ -87,7 +86,6 @@ const DashboardSync = {
       total:          items.length,
       thisWeek:       thisWeek.length,
       teacherCount:   teacherSet.size,
-      classroomCount: classroomSet.size,
       followUps:      followUps.length,
       helpSoon:       helpSoon.length,
       urgent:         urgent.length,
@@ -124,11 +122,6 @@ const DashboardSync = {
         .filter(Boolean)
     );
 
-    const pulseSupportReqs = items.filter(i => {
-      const sl = i["Support Level"] || "";
-      return sl === "talk-weekly" || sl === "need-help-now";
-    }).length;
-
     const catCounts = {};
     items.forEach(i => {
       String(i["Category"] || "").split(",").map(c => c.trim()).filter(Boolean)
@@ -139,7 +132,6 @@ const DashboardSync = {
     return {
       total:            items.length,
       flaggedToday:     flaggedToday.size,
-      pulseSupportReqs,
       topCategory
     };
   },

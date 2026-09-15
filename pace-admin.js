@@ -33,7 +33,13 @@
     scm:             ["SCM Used", "SCM", "scmUsed"],
     notes:           ["Notes", "Visit Notes", "notes"],
     submittedAt:     ["Submitted At", "Created", "createdAt", "timestamp"],
-    returnStatus:    ["Return Status", "returnStatus"]
+    returnStatus:    ["Return Status", "returnStatus"],
+    // Standard SharePoint system metadata, not new columns — used for the
+    // administrative edit audit trail only (Part 5). "Editor" is a Person
+    // field; see text()'s object-unwrapping below for how a display name is
+    // pulled out of whatever shape Graph returns for it.
+    modified:        ["Modified"],
+    editor:          ["Editor"]
   };
 
   // Room identity, matched exactly to PACE Room Tracker's own config.js —
@@ -153,7 +159,12 @@
       notes:           text(firstValue(row, FIELD_ALIASES.notes)),
       submittedAt:     text(firstValue(row, FIELD_ALIASES.submittedAt)),
       returnStatus:    text(firstValue(row, FIELD_ALIASES.returnStatus)),
-      isCompleted:     Boolean(timeOut)
+      isCompleted:     Boolean(timeOut),
+      // Standard SharePoint metadata (Part 5 audit trail) — text() already
+      // unwraps whatever object shape Graph returns for the Editor person
+      // field; "" here means genuinely unavailable, never a guess.
+      modified:        text(firstValue(row, FIELD_ALIASES.modified)),
+      modifiedBy:      text(firstValue(row, FIELD_ALIASES.editor))
     };
   }
 

@@ -4035,6 +4035,25 @@ tbody tr:hover td { background: var(--color-primary-light); }
   .detail-label { flex: 0 0 110px; }
 }
 
+/* ── Reports / PACE: Admin Edit Forms ───────────────────────────────────────── */
+.detail-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 4px;
+  border-bottom: none;
+}
+.detail-section .form-field { margin-bottom: 12px; }
+.detail-section .form-field:last-child { margin-bottom: 0; }
+.detail-checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0 12px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
 /* ── Setup Admin UI ─────────────────────────────────────────────────────────── */
 
 .setup-source-bar {

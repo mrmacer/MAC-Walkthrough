@@ -219,6 +219,30 @@ const GRAPH = {
     return this._patch(`sites/${siteId}/lists/${listId}/items/${itemId}/fields`, fields);
   },
 
+  // Administrative correction of an EXISTING walkthrough — always PATCHes
+  // IEP_Walkthrough_Observations/{itemId}, never creates a new item. The
+  // caller must never include Observation ID / Session ID / Submission ID /
+  // Created / Modified / AI Summary / AI Suggestions in `displayFields` —
+  // this wrapper does not filter them out, it trusts the caller the same
+  // way updateMappedListItem's other callers (Setup) already do.
+  async updateWalkthrough(itemId, displayFields) {
+    if (!itemId) throw new Error("A walkthrough SharePoint item id is required to save an edit.");
+    return this.updateMappedListItem("IEP_Walkthrough_Observations", itemId, displayFields);
+  },
+
+  // Administrative correction of an EXISTING PACE visit — always PATCHes
+  // IEP_Pace_Visits/{itemId}, never creates a new item. `displayFields`
+  // must use the CONFIRMED-live display names already established in
+  // pace-admin.js's FIELD_ALIASES (e.g. "Room", "Reason",
+  // "Intervention Used") — never the stale "Behavior"/"Interventions"
+  // names the legacy savePaceVisit() below still sends. Omit "Time Out"
+  // entirely unless the administrator is intentionally changing it — this
+  // wrapper does not touch any field not present in `displayFields`.
+  async updatePaceVisit(itemId, displayFields) {
+    if (!itemId) throw new Error("A PACE visit SharePoint item id is required to save an edit.");
+    return this.updateMappedListItem("IEP_Pace_Visits", itemId, displayFields);
+  },
+
   async createListItem(listName, fields) {
     const siteId = await this.getSiteId();
     const listId = await this.getListId(listName);
