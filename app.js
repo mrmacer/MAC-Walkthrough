@@ -442,8 +442,16 @@ const APP_CACHE = {
   clear(key)      { if (key) { delete this._data[key]; } else { this._data = {}; } }
 };
 
+// FIXED (previously identified inconsistency): this used to check only
+// AUTH.isAdmin — an Administrator per IEP_Users2 who has been explicitly
+// denied via IEP_App_Users (Admin Panel = No) is blocked from the UI
+// entirely by APP.init()'s gate, but could still have reached these Setup
+// write actions some other way (e.g. the browser console) since the
+// functions are always defined regardless of what's rendered. Now uses the
+// same MAC_ADMIN_PANEL_ALLOWED boundary canAccessRoute() already enforces
+// for every protected route.
 function requireSetupAdmin() {
-  if (!AUTH.isAdmin) throw new Error("Admin access required.");
+  if (!MAC_ADMIN_PANEL_ALLOWED) throw new Error("Admin Panel access required.");
 }
 
 function normalizeSetupUser(item) {
@@ -467,17 +475,10 @@ function normalizeSetupTeacher(item) {
   };
 }
 
-function normalizeSetupStudent(item) {
-  return {
-    spId:      item.id || item.spId,
-    pilotId:   item.PilotID || item.Pilot_x0020_ID || item.Title || "",
-    name:      item.StudentName || item.Student_x0020_Name || item.Name || "",
-    teacher:   item.Teacher || item.TeacherName || "",
-    classroom: item.Classroom || "",
-    active:    item.Active === true || item.Active === "Yes" || item.Active === undefined,
-    raw:       item
-  };
-}
+// NOTE: student records now come from STUDENT_ROSTER (shared with Daily
+// Pulse/PACE) — see SETUP_DATA.refresh() below. There is no
+// normalizeSetupStudent()/pilot-id generator anymore; the production
+// roster (IEP_Students_2026_27) has no Pilot ID column to generate.
 
 function normalizeSetupClassroom(item) {
   return {
@@ -495,14 +496,6 @@ function createSetupUserId(role, name) {
   return `${prefix}-${slug}-${Date.now().toString(36)}`;
 }
 
-function getNextPilotId(students) {
-  const nums = students
-    .map(s => parseInt(String(s.pilotId || "").replace(/^P0*/, ""), 10))
-    .filter(n => !isNaN(n));
-  const next = nums.length ? Math.max(...nums) + 1 : 1;
-  return "P" + String(next).padStart(3, "0");
-}
-
 const SETUP_DATA = {
   users:      [],
   teachers:   [],
@@ -514,15 +507,20 @@ const SETUP_DATA = {
   async refresh() {
     this.loading = true;
     this.error   = null;
-    const [usersR, teachersR, studentsR, classroomsR] = await Promise.allSettled([
+    // Students: STUDENT_ROSTER (shared with Daily Pulse/PACE) is the single
+    // source of truth for IEP_Students_2026_27 — Setup no longer reads or
+    // normalizes the old pilot list independently. See STUDENT_ROSTER.error
+    // below for its own load-failure state (kept separate from this.error,
+    // which the Users tab's banner is written for).
+    const [usersR, teachersR, , classroomsR] = await Promise.allSettled([
       GRAPH.getListItems(SETUP_LISTS.users),
       GRAPH.getWhoAreYouVisiting(),
-      GRAPH.getListItems(SETUP_LISTS.students).catch(() => []),
+      STUDENT_ROSTER.refresh(),
       GRAPH.getListItems(SETUP_LISTS.classrooms).catch(() => [])
     ]);
     this.users      = usersR.status      === "fulfilled" ? usersR.value.map(normalizeSetupUser)      : [];
     this.teachers   = teachersR.status   === "fulfilled" ? teachersR.value.map(normalizeSetupTeacher) : [];
-    this.students   = studentsR.status   === "fulfilled" ? studentsR.value.map(normalizeSetupStudent) : [];
+    this.students   = STUDENT_ROSTER.getAll();
     this.classrooms = classroomsR.status === "fulfilled" ? classroomsR.value.map(normalizeSetupClassroom) : [];
     if (usersR.status === "rejected") this.error = usersR.reason?.message || "Failed to load users.";
     this.loading = false;
@@ -5080,28 +5078,39 @@ const APP = {
       </div>`;
   },
 
+  // Setup → Students manages the SAME production roster Daily Pulse/PACE
+  // read (STUDENT_ROSTER / CONFIG.STUDENT_ROSTER_LIST) — never a second,
+  // independent student database. The old pilot list
+  // (IEP_Skook_Pilot_Students) is untouched but no longer used here; it
+  // remains only as STUDENT_ROSTER's own defensive fallback if
+  // CONFIG.STUDENT_ROSTER_LIST is ever reset to its placeholder.
   _renderStudentsTab() {
-    const students  = SETUP_DATA.students;
-    const teachers  = SETUP_DATA.teachers;
-    const nextId    = getNextPilotId(students);
+    const students   = SETUP_DATA.students;
+    const teachers    = SETUP_DATA.teachers;
+    const sourceList = STUDENT_ROSTER._listName();
+    const yesNo = ok => ok ? '<span class="badge badge-green">Yes</span>' : '<span class="badge badge-slate">No</span>';
     return `
       <div class="setup-source-bar">
-        <span class="setup-source-label">Source: ${escHtml(SETUP_LISTS.students)}</span>
+        <span class="setup-source-label">Source: ${escHtml(sourceList.toUpperCase())}</span>
         <span class="text-muted" style="font-size:12px">${students.length} student${students.length!==1?"s":""}</span>
       </div>
+      ${STUDENT_ROSTER.error ? `<div class="warning-banner">
+        <svg viewBox="0 0 20 20" fill="currentColor" width="18" height="18" style="flex-shrink:0"><path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd"/></svg>
+        <div>Student roster could not be loaded from <strong>${escHtml(sourceList)}</strong>: ${escHtml(STUDENT_ROSTER.error)}</div>
+      </div>` : ""}
       <div class="form-card">
         <h3>Add Student</h3>
         <div class="form-grid">
           <div class="form-field">
-            <label class="form-label">Pilot ID <span class="req">*</span></label>
-            <input class="form-input" id="newStudentPilotId" value="${escHtml(nextId)}" maxlength="20">
+            <label class="form-label">First Name <span class="req">*</span></label>
+            <input class="form-input" id="newStudentFirstName" placeholder="First name" maxlength="60">
           </div>
           <div class="form-field">
-            <label class="form-label">Student Name (First + Last Initial) <span class="req">*</span></label>
-            <input class="form-input" id="newStudentName" placeholder="e.g. Antonio H." maxlength="60">
+            <label class="form-label">Last Name <span class="req">*</span></label>
+            <input class="form-input" id="newStudentLastName" placeholder="Last name" maxlength="60">
           </div>
           <div class="form-field">
-            <label class="form-label">Teacher</label>
+            <label class="form-label">Teacher <span class="req">*</span></label>
             <select class="form-select" id="newStudentTeacher">
               <option value="">— Select teacher —</option>
               ${teachers.map(t => `<option value="${escHtml(t.name)}">${escHtml(t.name)}</option>`).join("")}
@@ -5111,25 +5120,36 @@ const APP = {
             <label class="form-label">Classroom (optional)</label>
             <input class="form-input" id="newStudentClassroom" placeholder="e.g. Room 12" maxlength="80">
           </div>
-          <div class="form-field" style="display:flex;align-items:flex-end">
-            <button class="btn btn-primary" id="addStudentBtn" style="width:100%">Add Student</button>
-          </div>
         </div>
+        <label class="detail-checkbox-row" for="newStudentActive">
+          <input type="checkbox" id="newStudentActive" checked>
+          <span>Active</span>
+        </label>
+        <label class="detail-checkbox-row" for="newStudentPace">
+          <input type="checkbox" id="newStudentPace">
+          <span>PACE Enabled</span>
+        </label>
+        <label class="detail-checkbox-row" for="newStudentPulse">
+          <input type="checkbox" id="newStudentPulse">
+          <span>Daily Pulse Enabled</span>
+        </label>
+        <button class="btn btn-primary" id="addStudentBtn" style="margin-top:8px">Add Student</button>
       </div>
       <div class="card">
         <div class="card-title">Students (${students.length})</div>
         ${students.length === 0
-          ? `<div class="empty-state"><div class="empty-icon">🪪</div><p>No students found in SharePoint.</p></div>`
-          : `<div class="table-wrap"><table><thead><tr><th>Pilot ID</th><th>Name</th><th>Teacher</th><th>Classroom</th><th>Status</th><th></th></tr></thead><tbody>
+          ? `<div class="empty-state"><div class="empty-icon">🪪</div><p>No students found in ${escHtml(sourceList)}.</p></div>`
+          : `<div class="table-wrap"><table><thead><tr><th>Student</th><th>Teacher</th><th>Classroom</th><th>Active</th><th>PACE</th><th>Daily Pulse</th><th></th></tr></thead><tbody>
               ${students.map(s => `<tr class="${s.active ? "" : "row-inactive"}">
-                <td><strong>${escHtml(s.pilotId)}</strong></td>
-                <td>${escHtml(s.name)}</td>
-                <td class="text-muted">${escHtml(s.teacher) || "—"}</td>
+                <td><strong>${escHtml(s.name)}</strong></td>
+                <td class="text-muted">${escHtml(s.teacherName) || "—"}</td>
                 <td class="text-muted">${escHtml(s.classroom) || "—"}</td>
                 <td>${s.active ? '<span class="badge badge-green">Active</span>' : '<span class="badge badge-slate">Inactive</span>'}</td>
+                <td>${yesNo(s.paceEnabled)}</td>
+                <td>${yesNo(s.dailyPulseEnabled)}</td>
                 <td>${s.active
-                  ? `<button class="btn btn-danger btn-sm deactivate-student-btn" data-sp-id="${escHtml(s.spId)}" data-name="${escHtml(s.name)}">Deactivate</button>`
-                  : `<button class="btn btn-secondary btn-sm reactivate-student-btn" data-sp-id="${escHtml(s.spId)}" data-name="${escHtml(s.name)}">Reactivate</button>`}
+                  ? `<button class="btn btn-danger btn-sm deactivate-student-btn" data-sp-id="${escHtml(s.id)}" data-name="${escHtml(s.name)}">Deactivate</button>`
+                  : `<button class="btn btn-secondary btn-sm reactivate-student-btn" data-sp-id="${escHtml(s.id)}" data-name="${escHtml(s.name)}">Reactivate</button>`}
                 </td>
               </tr>`).join("")}
             </tbody></table></div>`}
@@ -5287,22 +5307,33 @@ const APP = {
 
     if (tab === "students") {
       document.getElementById("addStudentBtn")?.addEventListener("click", async () => {
-        const pilotId   = document.getElementById("newStudentPilotId").value.trim();
-        const name      = document.getElementById("newStudentName").value.trim();
+        const firstName = document.getElementById("newStudentFirstName").value.trim();
+        const lastName  = document.getElementById("newStudentLastName").value.trim();
         const teacher   = document.getElementById("newStudentTeacher").value;
         const classroom = document.getElementById("newStudentClassroom").value.trim();
-        if (!pilotId || !name) { showToast("Pilot ID and student name are required.", "error"); return; }
+        const active            = document.getElementById("newStudentActive").checked;
+        const paceEnabled       = document.getElementById("newStudentPace").checked;
+        const dailyPulseEnabled = document.getElementById("newStudentPulse").checked;
+        if (!firstName || !lastName || !teacher) {
+          showToast("First name, last name, and teacher are required.", "error");
+          return;
+        }
         try {
           requireSetupAdmin();
-          await GRAPH.createMappedListItem(SETUP_LISTS.students, {
-            "Title":        pilotId,
-            "Student Name": name,
-            "Teacher":      teacher,
-            "Classroom":    classroom,
-            "Active":       "Yes"
+          // Writes to the SAME production roster STUDENT_ROSTER reads
+          // (CONFIG.STUDENT_ROSTER_LIST) — no Pilot ID, no combined
+          // "First + Last Initial" name; the production schema has separate
+          // first/last name columns and no student-id column at all.
+          await GRAPH.createMappedListItem(STUDENT_ROSTER._listName(), {
+            "Student First Name":  firstName,
+            "Student Last Name":   lastName,
+            "Teacher":             teacher,
+            "Classroom":           classroom,
+            "Active":              active ? "Yes" : "No",
+            "PACE Enabled":        paceEnabled ? "Yes" : "No",
+            "Daily Pulse Enabled": dailyPulseEnabled ? "Yes" : "No"
           });
-          showToast(`Student "${name}" (${pilotId}) added.`);
-          APP_CACHE.clear("students");
+          showToast(`Student "${firstName} ${lastName}" added.`);
           await SETUP_DATA.refresh();
         } catch (err) { showToast("Failed to add student: " + err.message, "error"); }
       });
@@ -5314,18 +5345,20 @@ const APP = {
           const { spId, name } = deactivateBtn.dataset;
           if (!confirm(`Deactivate "${name}"? Their historical records are preserved.`)) return;
           try {
-            await GRAPH.updateMappedListItem(SETUP_LISTS.students, spId, { "Active": "No" });
+            requireSetupAdmin();
+            // PATCHes the existing item by its SharePoint id — never
+            // creates a new record.
+            await GRAPH.updateMappedListItem(STUDENT_ROSTER._listName(), spId, { "Active": "No" });
             showToast(`"${name}" deactivated.`);
-            APP_CACHE.clear("students");
             await SETUP_DATA.refresh();
           } catch (err) { showToast("Failed to deactivate: " + err.message, "error"); }
         }
         if (reactivateBtn) {
           const { spId, name } = reactivateBtn.dataset;
           try {
-            await GRAPH.updateMappedListItem(SETUP_LISTS.students, spId, { "Active": "Yes" });
+            requireSetupAdmin();
+            await GRAPH.updateMappedListItem(STUDENT_ROSTER._listName(), spId, { "Active": "Yes" });
             showToast(`"${name}" reactivated.`);
-            APP_CACHE.clear("students");
             await SETUP_DATA.refresh();
           } catch (err) { showToast("Failed to reactivate: " + err.message, "error"); }
         }
