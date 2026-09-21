@@ -80,7 +80,7 @@ function downloadFile(filename, content, mimeType) {
   const url  = URL.createObjectURL(blob);
   const a    = document.createElement("a");
   a.href = url; a.download = filename; a.click();
-  URL.revokeObjectURL(url);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 function statusBadgeHtml(status) {
@@ -3566,8 +3566,13 @@ const APP = {
   _renderPaceAdminResults() {
     const container = document.getElementById("paceAdminResults");
     if (!container || !this._paceAdminData) return;
-    const filtered = PACE_ADMIN.filterVisits(this._paceAdminData.visits, this._getPaceAdminFilters())
+    const filters = this._getPaceAdminFilters();
+    const filtered = PACE_ADMIN.filterVisits(this._paceAdminData.visits, filters)
       .sort(PACE_ADMIN.sortNewest);
+    // Exports reuse exactly this filtered, in-memory set (not the 200-row
+    // display slice, and never a fresh query).
+    this._paceAdminFiltered = filtered;
+    this._paceAdminFilters  = filters;
     const completed = filtered.filter(v => v.isCompleted);
     const summary = PACE_ADMIN.summarize(filtered);
     const shown = filtered.slice(0, 200);
@@ -3586,6 +3591,7 @@ const APP = {
         <div><strong>${summary.uniqueStudents}</strong> student${summary.uniqueStudents !== 1 ? "s" : ""}</div>
         ${summary.averageDuration !== null ? `<div><strong>${summary.averageDuration} min</strong> average</div>` : ""}
         ${filtered.length !== completed.length ? `<div class="pace-legacy-count">${filtered.length - completed.length} older/incomplete</div>` : ""}
+        ${this._paceExportMenuHtml(filters)}
       </div>
       ${shown.length === 0 ? `<div class="card"><div class="empty-state"><div class="empty-icon">🔎</div><p>No PACE visits match these filters.</p></div></div>` : `
         <div class="card pace-results-card">
@@ -3611,6 +3617,71 @@ const APP = {
     container.querySelectorAll(".pace-student-link").forEach(button =>
       button.addEventListener("click", () => this._openPaceStudentHistory(button.dataset.student))
     );
+    this._bindPaceExportMenu(container);
+  },
+
+  // ── PACE Log export ────────────────────────────────────────────────────
+  // Admin-only. Files are generated locally from the filtered in-memory set
+  // (PACE_EXPORT); nothing is uploaded or re-queried.
+
+  _paceExportAllowed() {
+    return !!AUTH.isAdmin && !USER_CONTEXT.isViewingAsTeacher && MAC_ADMIN_PANEL_ALLOWED === true;
+  },
+
+  _paceExportMenuHtml(filters) {
+    if (!this._paceExportAllowed() || typeof PACE_EXPORT === "undefined") return "";
+    const oneStudent = !!filters.student;
+    return `<div class="pace-export">
+      <button type="button" class="btn btn-secondary btn-sm" id="paceExportBtn" aria-haspopup="menu" aria-expanded="false">Export ▾</button>
+      <div class="pace-export-menu" id="paceExportMenu" role="menu" hidden>
+        <button type="button" role="menuitem" data-export="csv">CSV</button>
+        <button type="button" role="menuitem" data-export="xlsx">Excel (.xlsx)</button>
+        <button type="button" role="menuitem" data-export="docx" ${oneStudent ? "" : 'disabled title="Select a single student to export a summary document"'}>Student Summary Document</button>
+        <div class="pace-export-sep">Advanced</div>
+        <button type="button" role="menuitem" data-export="json">JSON</button>
+      </div>
+    </div>`;
+  },
+
+  _bindPaceExportMenu(container) {
+    const btn  = container.querySelector("#paceExportBtn");
+    const menu = container.querySelector("#paceExportMenu");
+    if (!btn || !menu) return;
+    const close = () => { menu.hidden = true; btn.setAttribute("aria-expanded", "false"); };
+    btn.addEventListener("click", event => {
+      event.stopPropagation();
+      menu.hidden = !menu.hidden;
+      btn.setAttribute("aria-expanded", String(!menu.hidden));
+    });
+    menu.querySelectorAll("[data-export]").forEach(item =>
+      item.addEventListener("click", () => { close(); this._exportPaceLog(item.dataset.export); })
+    );
+    if (!this._paceExportDismissBound) {
+      this._paceExportDismissBound = true;
+      document.addEventListener("click", () => {
+        const openMenu = document.getElementById("paceExportMenu");
+        if (openMenu && !openMenu.hidden) {
+          openMenu.hidden = true;
+          document.getElementById("paceExportBtn")?.setAttribute("aria-expanded", "false");
+        }
+      });
+    }
+  },
+
+  _exportPaceLog(kind) {
+    if (!this._paceExportAllowed()) return;
+    const visits  = this._paceAdminFiltered || [];
+    const filters = this._paceAdminFilters || {};
+    if (!visits.length) { showToast("No PACE records match the current filters — nothing to export.", "error"); return; }
+    if (kind === "docx" && !filters.student) { showToast("Select a single student to export a summary document.", "error"); return; }
+    try {
+      const file = PACE_EXPORT.build(kind, visits, { student: filters.student, from: filters.from, to: filters.to });
+      downloadFile(file.filename, file.content, file.mime);
+      showToast(`Exported ${visits.length} record${visits.length !== 1 ? "s" : ""} to ${file.filename}`, "success");
+    } catch (err) {
+      console.error("PACE export failed:", err.message);
+      showToast("Export failed: " + (err.message || "unknown error"), "error");
+    }
   },
 
   // Visit id currently open in edit mode inside the student-history modal
