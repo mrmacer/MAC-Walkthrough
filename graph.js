@@ -242,7 +242,37 @@ const GRAPH = {
     if (!itemId) throw new Error("A PACE visit SharePoint item id is required to save an edit.");
     return this.updateMappedListItem("IEP_Pace_Visits", itemId, displayFields);
   },
+// ...existing code...
 
+  async deletePaceVisit(itemId) {
+    if (!itemId) {
+      throw new Error("A PACE visit SharePoint item ID is required.");
+    }
+    if (!MAC_ADMIN_PANEL_ALLOWED) {
+      throw new Error("Administrator access required.");
+    }
+
+    const siteId = await this.getSiteId();
+    const listId = await this.getListId("IEP_Pace_Visits");
+    const token = await AUTH.acquireGraphToken();
+
+    const response = await fetch(
+      `${this._BASE}/sites/${siteId}/lists/${listId}/items/${encodeURIComponent(itemId)}`,
+      {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${token}` }
+      }
+    );
+
+    if (!response.ok) {
+      const text = await response.text().catch(() => "");
+      throw new Error(`Graph DELETE ${response.status}: ${text}`);
+    }
+
+    return true;
+  },
+
+// ...existing code...
   async createListItem(listName, fields) {
     const siteId = await this.getSiteId();
     const listId = await this.getListId(listName);

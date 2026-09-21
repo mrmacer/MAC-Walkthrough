@@ -3737,6 +3737,36 @@ const APP = {
         this._openPaceStudentHistory(this._paceHistoryStudent);
       });
     });
+        body.querySelectorAll(".pace-visit-delete-btn").forEach(btn => {
+      btn.addEventListener("click", async e => {
+        e.preventDefault();
+
+        if (!MAC_ADMIN_PANEL_ALLOWED || this._paceEditSaving) return;
+
+        if (!confirm("Are you sure you want to delete this PACE visit?")) return;
+
+        try {
+          this._paceEditSaving = true;
+          btn.disabled = true;
+          btn.textContent = "Deleting…";
+
+          await GRAPH.deletePaceVisit(btn.dataset.visitId);
+
+          showToast("PACE visit deleted.");
+          this._paceAdminData = await PACE_ADMIN.load(true);
+          this._paceEditingVisitId = null;
+          this._openPaceStudentHistory(this._paceHistoryStudent);
+          this._renderPaceAdminResults();
+        } catch (err) {
+          console.error("PACE visit delete failed:", err);
+          showToast("Delete failed: " + (err.message || String(err)), "error");
+          btn.disabled = false;
+          btn.textContent = "Delete";
+        } finally {
+          this._paceEditSaving = false;
+        }
+      });
+    });
     body.querySelectorAll(".pace-visit-edit-cancel").forEach(btn => {
       // Cancel performs zero Graph writes — just re-render the read-only view.
       btn.addEventListener("click", e => {
@@ -3839,7 +3869,10 @@ const APP = {
         </div>
         ${MAC_ADMIN_PANEL_ALLOWED ? `
         <div class="detail-actions" style="margin-top:12px">
-          <button type="button" class="btn btn-secondary btn-sm pace-visit-edit-btn" data-visit-id="${escHtml(visit.id)}">Edit</button>
+          <button type="button" class="btn btn-secondary btn-sm pace-visit-edit-btn"
+                  data-visit-id="${escHtml(visit.id)}">Edit</button>
+          <button type="button" class="btn btn-danger btn-sm pace-visit-delete-btn"
+                  data-visit-id="${escHtml(visit.id)}">Delete</button>
         </div>` : ""}
       </div>`;
   },
