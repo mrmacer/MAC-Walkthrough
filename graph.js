@@ -81,16 +81,6 @@ const GRAPH = {
     return match.id;
   },
 
-  // TEMPORARY DIAGNOSTIC — remove once the macwalkthroughwhoareyouvisiting
-  // 404 is resolved. Read-only: a single GET, no writes, same mechanism
-  // getListId() already uses (getSiteId() + sites/{id}/lists). Powers the
-  // "⚠ SP Diagnostic" tab in Setup — see APP._renderDiagTab() in app.js.
-  async listSiteLists() {
-    const siteId = await this.getSiteId();
-    const data   = await this._get(`sites/${siteId}/lists?$select=id,name,displayName`);
-    return data.value || [];
-  },
-
   async getListItems(listName) {
     const siteId = await this.getSiteId();
     const listId = await this.getListId(listName);
@@ -492,8 +482,15 @@ const GRAPH = {
   },
 
   async getWhoAreYouVisiting() {
+    // Resolve the internal name to the real Graph list GUID first, exactly
+    // like every other list reader in this file (getListItems/createListItem/
+    // etc.) — a list's internal/display name is not a valid /lists/{id}
+    // path segment on its own, and the GUID can differ per environment, so
+    // it is never hardcoded here.
+    const siteId = await this.getSiteId();
+    const listId = await this.getListId("macwalkthroughwhoareyouvisiting");
     const data = await this._get(
-      `sites/${this._SITE}/lists/macwalkthroughwhoareyouvisiting/items?$expand=fields($select=teacher)`
+      `sites/${siteId}/lists/${listId}/items?$expand=fields($select=teacher)`
     );
     return data.value
       .map(item => ({
