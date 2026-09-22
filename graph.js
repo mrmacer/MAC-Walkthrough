@@ -81,6 +81,16 @@ const GRAPH = {
     return match.id;
   },
 
+  // TEMPORARY DIAGNOSTIC — remove once the macwalkthroughwhoareyouvisiting
+  // 404 is resolved. Read-only: a single GET, no writes, same mechanism
+  // getListId() already uses (getSiteId() + sites/{id}/lists). Powers the
+  // "⚠ SP Diagnostic" tab in Setup — see APP._renderDiagTab() in app.js.
+  async listSiteLists() {
+    const siteId = await this.getSiteId();
+    const data   = await this._get(`sites/${siteId}/lists?$select=id,name,displayName`);
+    return data.value || [];
+  },
+
   async getListItems(listName) {
     const siteId = await this.getSiteId();
     const listId = await this.getListId(listName);

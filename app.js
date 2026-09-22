@@ -5242,8 +5242,12 @@ const APP = {
     }
     activeTab = activeTab || "users";
     const el  = document.getElementById("page-setup");
-    const tabs = ["users","teachers","students","classrooms","data"];
-    const tabLabels = { users:"Users", teachers:"Teachers", students:"Students", classrooms:"Classrooms", data:"Data Tools" };
+    // "diag" is a TEMPORARY, admin-only, read-only tab added to diagnose the
+    // macwalkthroughwhoareyouvisiting Graph 404 — see _renderDiagTab() below
+    // and GRAPH.listSiteLists() in graph.js. Remove this tab entry (and the
+    // two pieces below) once the underlying list issue is resolved.
+    const tabs = ["users","teachers","students","classrooms","data","diag"];
+    const tabLabels = { users:"Users", teachers:"Teachers", students:"Students", classrooms:"Classrooms", data:"Data Tools", diag:"⚠ SP Diagnostic (temp)" };
 
     el.innerHTML = `
       <div class="page-header">
@@ -5298,7 +5302,73 @@ const APP = {
     if (tab === "students")    return this._renderStudentsTab();
     if (tab === "classrooms")  return this._renderClassroomsTab();
     if (tab === "data")        return this._renderDataTab();
+    if (tab === "diag")        return this._renderDiagTab();
     return "";
+  },
+
+  // TEMPORARY DIAGNOSTIC (remove after the macwalkthroughwhoareyouvisiting
+  // Graph 404 is resolved). Admin-only — this whole page is already gated
+  // by renderSetup()'s AUTH.isAdmin check above. Read-only: fetches
+  // sites/{site}/lists?$select=id,name,displayName via GRAPH.listSiteLists()
+  // (a single GET, same mechanism getListId() already uses) and shows the
+  // result. No SharePoint list is created, changed, or deleted by this tab.
+  _spDiagResult: null,
+
+  _renderDiagTab() {
+    const TARGET = "macwalkthroughwhoareyouvisiting";
+    const FLAG_WORDS = ["teacher", "staff", "visit", "walkthrough", "user"];
+    const r = this._spDiagResult;
+
+    const intro = `
+      <div class="setup-source-bar">
+        <span class="setup-source-label">TEMPORARY — read-only SharePoint list inventory, for diagnosing the "${TARGET}" Graph 404. Safe to remove once resolved.</span>
+      </div>
+      <div class="form-card">
+        <h3>⚠ Temporary Diagnostic</h3>
+        <p class="form-help">
+          Reads <code>sites/{site}/lists?$select=id,name,displayName</code> from Microsoft Graph using your
+          existing signed-in session (the same site and lookup GRAPH.getListId() already uses).
+          This performs a single GET request — it does not create, modify, or delete anything.
+        </p>
+        <button type="button" class="btn btn-secondary btn-sm" id="spDiagRunBtn">${r ? "Run again" : "Run diagnostic"}</button>
+      </div>`;
+
+    if (!r) return intro;
+
+    if (r.error) {
+      return intro + `
+        <div class="warning-banner">
+          <div><strong>Diagnostic request failed.</strong><br>${escHtml(r.error)}</div>
+        </div>`;
+    }
+
+    const rows = r.lists.map(l => {
+      const name = String(l.name || "");
+      const displayName = String(l.displayName || "");
+      const haystack = `${name} ${displayName}`.toLowerCase();
+      const isTarget = [name, displayName].map(v => v.toLowerCase().trim()).includes(TARGET);
+      const flagged  = !isTarget && FLAG_WORDS.some(w => haystack.includes(w));
+      return `<tr style="${isTarget ? "background:#dcfce7" : flagged ? "background:#fef9c3" : ""}">
+        <td>${escHtml(displayName)}</td>
+        <td>${escHtml(name)}</td>
+        <td style="font-family:monospace;font-size:11px">${escHtml(l.id || "")}</td>
+        <td>${isTarget ? '<span class="badge badge-green">target match</span>' : flagged ? '<span class="badge badge-slate">keyword match</span>' : ""}</td>
+      </tr>`;
+    }).join("");
+
+    return intro + `
+      <div class="card">
+        <div class="card-title" style="color:${r.found ? "#166534" : "#991b1b"}">
+          "${TARGET}" ${r.found ? "FOUND" : "NOT FOUND"}
+        </div>
+        <div class="table-wrap"><table><thead><tr>
+          <th>Display Name</th><th>Internal Name</th><th>List ID</th><th></th>
+        </tr></thead><tbody>${rows || `<tr><td colspan="4">No lists returned.</td></tr>`}</tbody></table></div>
+        <p class="text-muted" style="font-size:12px;margin-top:8px">
+          ${r.lists.length} list${r.lists.length !== 1 ? "s" : ""} total, sorted alphabetically ·
+          highlighted rows contain "teacher", "staff", "visit", "walkthrough", or "user"
+        </p>
+      </div>`;
   },
 
   _renderUsersTab() {
@@ -5536,6 +5606,29 @@ const APP = {
   _bindSetupTabEvents(tab) {
     const tc = document.getElementById("tabContent");
     if (!tc) return;
+
+    // TEMPORARY DIAGNOSTIC — remove alongside _renderDiagTab() once resolved.
+    // Read-only: GRAPH.listSiteLists() issues one GET and nothing else.
+    if (tab === "diag") {
+      document.getElementById("spDiagRunBtn")?.addEventListener("click", async () => {
+        const btn = document.getElementById("spDiagRunBtn");
+        if (btn) { btn.disabled = true; btn.textContent = "Running…"; }
+        try {
+          requireSetupAdmin();
+          const lists = await GRAPH.listSiteLists();
+          const sorted = [...lists].sort((a, b) =>
+            String(a.displayName || a.name || "").localeCompare(String(b.displayName || b.name || "")));
+          const target = "macwalkthroughwhoareyouvisiting";
+          const found = sorted.some(l =>
+            [l.name, l.displayName].map(v => String(v || "").toLowerCase().trim()).includes(target));
+          this._spDiagResult = { lists: sorted, found, error: null };
+        } catch (err) {
+          this._spDiagResult = { lists: [], found: false, error: err.message || String(err) };
+        }
+        this._refreshSetupUI();
+      });
+      return;
+    }
 
     if (tab === "users") {
       document.getElementById("addUserBtn")?.addEventListener("click", async () => {
