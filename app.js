@@ -353,21 +353,31 @@ const STUDENT_ROSTER = {
   }
 };
 
-/* ── Teacher Directory (live SharePoint "Who Are You Visiting?" list) ────────── */
+/* ── Teacher Directory (live IEP_Users2 — active, Role includes Teacher) ──────── */
 //
-// PATCH: MOVE NEW WALKTHROUGH TEACHER DIRECTORY TO SHAREPOINT.
+// PATCH: USE IEP_Users2 AS THE CANONICAL WALKTHROUGH TEACHER DIRECTORY.
 //
-// Source of truth: macwalkthroughwhoareyouvisiting (field "teacher"), read
-// through the existing GRAPH.getWhoAreYouVisiting() loader — the very same
-// list Setup → Teachers already manages. This is the ONLY teacher source for
-// the primary New Walkthrough page (renderWalkthrough()/_submitWalkthrough()).
+// Source of truth: IEP_Users2 (SETUP_LISTS.users), the same list Setup →
+// Users and sign-in already read successfully — filtered to active users
+// whose Role includes "Teacher", via the existing normalizeSetupUser()/
+// isTeacherRole() helpers (no separate role-parsing logic here). This is the
+// ONLY teacher source for the primary New Walkthrough page
+// (renderWalkthrough()/_submitWalkthrough()).
 //
-// It is intentionally a small, dedicated, lazily-loaded module rather than
-// SETUP_DATA.teachers: SETUP_DATA.refresh() only ever runs when the Setup
-// page itself is rendered, so it is NOT populated yet when an admin's
+// The dedicated macwalkthroughwhoareyouvisiting list this used to read is
+// now unused in production (legacy, not deleted — see the note by
+// SETUP_LISTS below). It duplicated a staff directory IEP_Users2 already
+// maintains and had no reliable link to real login/role state.
+//
+// This stays a small, dedicated, lazily-loaded module rather than reading
+// SETUP_DATA.users directly: SETUP_DATA.refresh() only ever runs when the
+// Setup page itself is rendered, so it is NOT populated yet when an admin's
 // session lands directly on New Walkthrough (its default landing page).
 // This module follows the same load-on-first-visit / loading / error
-// pattern STUDENT_ROSTER already established for Daily Pulse and PACE.
+// pattern STUDENT_ROSTER already established for Daily Pulse and PACE, and
+// issues its own independent GRAPH.getListItems(SETUP_LISTS.users) call
+// (the exact same Graph read Setup → Users performs) rather than a second,
+// bespoke query implementation.
 //
 // PILOT_TEACHERS / DB.getTeachers() remain untouched and still back the
 // legacy prototype/admin-simulation screens (V2 Walkthrough, Teacher
@@ -383,22 +393,32 @@ const TEACHER_DIRECTORY = {
     this.loading = true;
     this.error   = null;
     try {
-      // GRAPH.getWhoAreYouVisiting() already trims/drops blank names and
-      // sorts alphabetically. Collapse duplicate visible names (case/space
-      // insensitive) deterministically — keep whichever row sorts first;
-      // there's no legitimate reason for a second identical entry to be
-      // separately selectable here.
-      const raw  = await GRAPH.getWhoAreYouVisiting();
+      const raw = await GRAPH.getListItems(SETUP_LISTS.users);
       const seen = new Set();
       const teachers = [];
-      raw.forEach(t => {
-        const key = t.name.trim().toLowerCase();
-        if (!key || seen.has(key)) return;
-        seen.add(key);
-        // SharePoint's own stable list-item id — never a position-derived
-        // or name-derived id, so it survives renames and reordering.
-        teachers.push({ id: t.spId, name: t.name });
-      });
+      raw
+        .map(normalizeSetupUser)
+        // Active only + Role includes Teacher, using the existing tolerant
+        // multi-role logic — a user with Role "Teacher, Administrator" (or
+        // "Teacher; Behavior Specialist") still counts as a teacher here,
+        // same as everywhere else in the app that checks this.
+        .filter(u => u.active && isTeacherRole(u.role))
+        .forEach(u => {
+          const name = String(u.name || "").trim();
+          if (!name) return;
+          // Collapse duplicate visible names (case/space insensitive)
+          // deterministically — keep whichever row sorts first; there's no
+          // legitimate reason for a second identical entry to be
+          // separately selectable here.
+          const key = name.toLowerCase();
+          if (seen.has(key)) return;
+          seen.add(key);
+          // IEP_Users2's own stable SharePoint item id (normalizeSetupUser's
+          // spId) — never a position-derived or name-derived id, so it
+          // survives renames and reordering.
+          teachers.push({ id: u.spId, name });
+        });
+      teachers.sort((a, b) => a.name.localeCompare(b.name));
       this._teachers = teachers;
       this.loaded = true;
       // Generic diagnostic only — a count, never the records themselves.
@@ -493,10 +513,17 @@ function recordBelongsToTeacher(record, teacher, roster) {
 
 const SETUP_LISTS = {
   users:      "IEP_Users2",
-  teachers:   "macwalkthroughwhoareyouvisiting",
   students:   "IEP_Skook_Pilot_Students",
   classrooms: "IEP_School_Settings"
 };
+
+// LEGACY, UNUSED: macwalkthroughwhoareyouvisiting was a dedicated staff
+// directory the New Walkthrough teacher picker and Setup → Teachers used to
+// read/write (SETUP_LISTS.teachers). Both now source active, Teacher-role
+// users from IEP_Users2 instead (see TEACHER_DIRECTORY above and
+// _renderTeachersTab() below), so this app no longer reads or writes that
+// list anywhere. The SharePoint list itself has not been touched or
+// deleted — it's simply unreferenced from here on.
 
 const APP_CACHE = {
   _data: {},
@@ -598,20 +625,6 @@ function resolveCanonicalTeacherValue(displayName, rosterStudents) {
   return first ? `${last}, ${first.charAt(0).toUpperCase()}` : last;
 }
 
-function normalizeSetupTeacher(item) {
-  // GRAPH.getWhoAreYouVisiting() already returns the normalized {spId, name}
-  // shape (graph.js), not a raw SharePoint item — `name` is the real field
-  // here. The other fallbacks are kept only for resilience against a future
-  // change to that contract; they were never the actual shape in production.
-  const name = (item.name || item.fields?.teacher || item.teacher || item.Title || "").trim();
-  return {
-    spId:      item.spId || item.id,
-    name,
-    hasAccess: PILOT_TEACHERS.some(p => p.name.toLowerCase() === name.toLowerCase()),
-    raw:       item
-  };
-}
-
 // NOTE: student records now come from STUDENT_ROSTER (shared with Daily
 // Pulse/PACE) — see SETUP_DATA.refresh() below. There is no
 // normalizeSetupStudent()/pilot-id generator anymore; the production
@@ -634,13 +647,11 @@ function createSetupUserId(role, name) {
 }
 
 const SETUP_DATA = {
-  users:         [],
-  teachers:      [],
-  students:      [],
-  classrooms:    [],
-  loading:       false,
-  error:         null,
-  teachersError: null,
+  users:      [],
+  students:   [],
+  classrooms: [],
+  loading:    false,
+  error:      null,
 
   async refresh() {
     this.loading = true;
@@ -650,23 +661,21 @@ const SETUP_DATA = {
     // normalizes the old pilot list independently. See STUDENT_ROSTER.error
     // below for its own load-failure state (kept separate from this.error,
     // which the Users tab's banner is written for).
-    const [usersR, teachersR, , classroomsR] = await Promise.allSettled([
+    //
+    // Teachers are no longer a separate load: _renderTeachersTab() derives
+    // them from this.users (active, Role includes Teacher) — see
+    // TEACHER_DIRECTORY above for the same derivation used by New
+    // Walkthrough. A Users load failure (this.error) is therefore already
+    // the correct/only error state for the Teachers tab too.
+    const [usersR, , classroomsR] = await Promise.allSettled([
       GRAPH.getListItems(SETUP_LISTS.users),
-      GRAPH.getWhoAreYouVisiting(),
       STUDENT_ROSTER.refresh(),
       GRAPH.getListItems(SETUP_LISTS.classrooms).catch(() => [])
     ]);
     this.users      = usersR.status      === "fulfilled" ? usersR.value.map(normalizeSetupUser)      : [];
-    this.teachers   = teachersR.status   === "fulfilled" ? teachersR.value.map(normalizeSetupTeacher) : [];
     this.students   = STUDENT_ROSTER.getAll();
     this.classrooms = classroomsR.status === "fulfilled" ? classroomsR.value.map(normalizeSetupClassroom) : [];
     if (usersR.status === "rejected") this.error = usersR.reason?.message || "Failed to load users.";
-    // Kept separate from `error` (the Users tab's own banner) so a Teachers
-    // load failure is never silently rendered as "0 teachers" — the Teachers
-    // tab shows its own banner instead of an empty state in that case.
-    this.teachersError = teachersR.status === "rejected"
-      ? (teachersR.reason?.message || "Failed to load teachers.")
-      : null;
     this.loading = false;
     if (typeof APP !== "undefined" && APP._refreshSetupUI) APP._refreshSetupUI();
   }
@@ -2008,14 +2017,19 @@ const APP = {
 
   // Populates Field 4 (Student) and the "no roster" hint for whichever
   // teacher is currently selected in the "Who are you visiting?" picker,
-  // from the live production roster (STUDENT_ROSTER / IEP_Students_2026_27)
-  // matched by teacher name — the same linkage Daily Pulse/PACE already use
-  // (STUDENT_ROSTER.getForTeacher()). Called on teacher change, on focus
-  // change, and once more if STUDENT_ROSTER was still loading when the page
-  // first rendered. A teacher with no roster match (new SharePoint teacher
-  // not yet reflected in the roster, or genuinely no students) is not an
-  // error: Whole Class / Small Group stay fully usable, and Individual
-  // Student shows the existing informational hint rather than blocking.
+  // from the live production roster (STUDENT_ROSTER / IEP_Students_2026_27).
+  // TEACHER_DIRECTORY names are IEP_Users2 display names (e.g. "Amber
+  // Bossons"); the roster's own Teacher column uses a different canonical
+  // format (e.g. "Bossons, A"). resolveCanonicalTeacherValue() — the same
+  // helper Setup → Students' Add Student "Teacher" dropdown already uses —
+  // bridges the two by reusing an existing roster record's exact value
+  // where one exists, rather than guessing a transformation here. Called on
+  // teacher change, on focus change, and once more if STUDENT_ROSTER was
+  // still loading when the page first rendered. A teacher with no roster
+  // match (new user not yet reflected in the roster, or genuinely no
+  // students) is not an error: Whole Class / Small Group stay fully usable,
+  // and Individual Student shows the existing informational hint rather
+  // than blocking.
   _refreshWalkthroughStudentOptions() {
     const el = document.getElementById("page-walkthrough");
     if (!el) return;
@@ -2023,7 +2037,8 @@ const APP = {
     const hint        = el.querySelector("#walkFocusRosterHint");
     const teacherId   = el.querySelector('[name="teacherId"]')?.value || "";
     const teacherName = TEACHER_DIRECTORY.find(teacherId)?.name || "";
-    const roster       = teacherName ? STUDENT_ROSTER.getForTeacher(teacherName) : [];
+    const rosterTeacherName = teacherName ? resolveCanonicalTeacherValue(teacherName, STUDENT_ROSTER.getAll()) : "";
+    const roster       = rosterTeacherName ? STUDENT_ROSTER.getForTeacher(rosterTeacherName) : [];
 
     if (studentSel) {
       studentSel.innerHTML = !teacherId
@@ -2043,10 +2058,10 @@ const APP = {
     const el = document.getElementById("page-walkthrough");
 
     // The "Who are you visiting?" list now comes live from SharePoint
-    // (macwalkthroughwhoareyouvisiting via TEACHER_DIRECTORY) instead of the
-    // hardcoded PILOT_TEACHERS/DB.getTeachers() cache. Load-before-render,
-    // same shape as STUDENT_ROSTER's Daily Pulse/PACE gating — never falls
-    // back to the stale pilot list on failure.
+    // (IEP_Users2, active + Role includes Teacher, via TEACHER_DIRECTORY)
+    // instead of the hardcoded PILOT_TEACHERS/DB.getTeachers() cache.
+    // Load-before-render, same shape as STUDENT_ROSTER's Daily Pulse/PACE
+    // gating — never falls back to the stale pilot list on failure.
     if (!TEACHER_DIRECTORY.loaded && !TEACHER_DIRECTORY.error) {
       el.innerHTML = this._teacherDirectoryStatusHtml("New Walkthrough");
       this._ensureTeacherDirectoryLoading("walkthrough");
@@ -5288,7 +5303,7 @@ const APP = {
 
     this._setupActiveTab = activeTab;
 
-    if (SETUP_DATA.users.length || SETUP_DATA.teachers.length) {
+    if (SETUP_DATA.users.length) {
       document.getElementById("tabContent").innerHTML = this._renderSetupTab(activeTab);
       this._bindSetupTabEvents(activeTab);
     } else {
@@ -5369,38 +5384,36 @@ const APP = {
       </div>`;
   },
 
+  // READ-ONLY. Teachers are IEP_Users2 users who are active and whose Role
+  // includes Teacher — the exact same derivation TEACHER_DIRECTORY uses for
+  // New Walkthrough, so this tab always shows precisely who is selectable
+  // there. There is no separate teacher list to add to or delete from any
+  // more; adding/removing/renaming a teacher is done on the Users tab.
   _renderTeachersTab() {
-    const teachers = SETUP_DATA.teachers;
+    const teachers = SETUP_DATA.users
+      .filter(u => u.active && isTeacherRole(u.role))
+      .sort((a, b) => a.name.localeCompare(b.name));
     return `
       <div class="setup-source-bar">
-        <span class="setup-source-label">Source: ${escHtml(SETUP_LISTS.teachers)}</span>
+        <span class="setup-source-label">Source: ${escHtml(SETUP_LISTS.users)} (active, Role includes Teacher)</span>
         <span class="text-muted" style="font-size:12px">${teachers.length} teacher${teachers.length!==1?"s":""}</span>
       </div>
-      ${SETUP_DATA.teachersError ? `<div class="warning-banner">
+      ${SETUP_DATA.error ? `<div class="warning-banner">
         <svg viewBox="0 0 20 20" fill="currentColor" width="18" height="18" style="flex-shrink:0"><path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd"/></svg>
-        <div>Teacher list could not be loaded from <strong>${escHtml(SETUP_LISTS.teachers)}</strong>: ${escHtml(SETUP_DATA.teachersError)}</div>
+        <div>Teacher list could not be loaded from <strong>${escHtml(SETUP_LISTS.users)}</strong>: ${escHtml(SETUP_DATA.error)}</div>
       </div>` : ""}
       <div class="form-card">
-        <h3>Add Teacher</h3>
-        <div class="inline-add">
-          <input class="form-input" id="newTeacherName" placeholder="Teacher last name" maxlength="80">
-          <button class="btn btn-primary" id="addTeacherBtn">Add</button>
-        </div>
-        <p class="form-help" style="margin-top:8px">Adds teacher to the "Who Are You Visiting?" list used by walkthroughs.</p>
+        <p class="form-help">Teachers are managed through the Users directory. Active users with the Teacher role automatically appear in walkthroughs.</p>
       </div>
-      ${SETUP_DATA.teachersError ? "" : `
+      ${SETUP_DATA.error ? "" : `
       <div class="card">
         <div class="card-title">Teachers (${teachers.length})</div>
         ${teachers.length === 0
-          ? `<div class="empty-state"><div class="empty-icon">👤</div><p>No teachers found.</p></div>`
-          : `<div class="table-wrap"><table><thead><tr><th>Name</th><th>App Access</th><th></th></tr></thead><tbody>
+          ? `<div class="empty-state"><div class="empty-icon">👤</div><p>No active Teacher-role users found.</p></div>`
+          : `<div class="table-wrap"><table><thead><tr><th>Name</th><th>Email</th></tr></thead><tbody>
               ${teachers.map(t => `<tr>
                 <td><strong>${escHtml(t.name)}</strong></td>
-                <td>${t.hasAccess
-                  ? '<span class="badge badge-green">Has Access</span>'
-                  : `<button class="btn btn-secondary btn-sm grant-access-btn" data-name="${escHtml(t.name)}">Grant Access</button>`}
-                </td>
-                <td><button class="btn btn-danger btn-sm del-teacher-btn" data-sp-id="${escHtml(t.spId)}" data-name="${escHtml(t.name)}">Remove</button></td>
+                <td>${escHtml(t.email || "—")}</td>
               </tr>`).join("")}
             </tbody></table></div>`}
       </div>`}`;
@@ -5601,51 +5614,8 @@ const APP = {
       });
     }
 
-    if (tab === "teachers") {
-      document.getElementById("addTeacherBtn")?.addEventListener("click", async () => {
-        const input = document.getElementById("newTeacherName");
-        const name  = input.value.trim();
-        if (!name) { showToast("Please enter a teacher name.", "error"); return; }
-        try {
-          requireSetupAdmin();
-          await GRAPH.createListItem(SETUP_LISTS.teachers, { teacher: name });
-          showToast(`Teacher "${name}" added.`);
-          APP_CACHE.clear("teachers");
-          // Refresh the live New Walkthrough directory too, so the new
-          // teacher is selectable there without a redeploy or cache wipe.
-          await Promise.all([SETUP_DATA.refresh(), TEACHER_DIRECTORY.refresh()]);
-        } catch (err) { showToast("Failed to add teacher: " + err.message, "error"); }
-      });
-
-      document.getElementById("newTeacherName")?.addEventListener("keydown", e => {
-        if (e.key === "Enter") document.getElementById("addTeacherBtn")?.click();
-      });
-
-      tc.addEventListener("click", async e => {
-        const btn = e.target.closest(".del-teacher-btn");
-        if (!btn) return;
-        const { spId, name } = btn.dataset;
-        if (!confirm(`Remove "${name}" from the visitor list?`)) return;
-        try {
-          const siteId = await GRAPH.getSiteId();
-          const listId = await GRAPH.getListId(SETUP_LISTS.teachers);
-          await GRAPH._patch(`sites/${siteId}/lists/${listId}/items/${spId}`, {});
-          showToast(`"${name}" removed.`);
-          APP_CACHE.clear("teachers");
-          // Removes the teacher from future New Walkthrough selections only.
-          // Historical SharePoint walkthrough records (IEP_Walkthrough_
-          // Observations) already store a plain snapshotted Teacher name and
-          // are never touched by this refresh or by this delete.
-          await Promise.all([SETUP_DATA.refresh(), TEACHER_DIRECTORY.refresh()]);
-        } catch (err) { showToast("Failed to remove teacher: " + err.message, "error"); }
-      });
-
-      tc.addEventListener("click", e => {
-        const btn = e.target.closest(".grant-access-btn");
-        if (!btn) return;
-        showToast("To grant app access, add this teacher to IEP_Users2 on the Users tab with role 'Teacher'.", "error");
-      });
-    }
+    // tab === "teachers" is read-only (derived from SETUP_DATA.users) — no
+    // handlers to bind. Adding/removing a teacher is done on the Users tab.
 
     if (tab === "students") {
       document.getElementById("addStudentBtn")?.addEventListener("click", async () => {

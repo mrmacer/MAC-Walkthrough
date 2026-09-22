@@ -479,25 +479,10 @@ const GRAPH = {
       "Submission ID":        entry.SubmissionID    || crypto.randomUUID(),
       "Synced":               true
     });
-  },
-
-  async getWhoAreYouVisiting() {
-    // Resolve the internal name to the real Graph list GUID first, exactly
-    // like every other list reader in this file (getListItems/createListItem/
-    // etc.) — a list's internal/display name is not a valid /lists/{id}
-    // path segment on its own, and the GUID can differ per environment, so
-    // it is never hardcoded here.
-    const siteId = await this.getSiteId();
-    const listId = await this.getListId("macwalkthroughwhoareyouvisiting");
-    const data = await this._get(
-      `sites/${siteId}/lists/${listId}/items?$expand=fields($select=teacher)`
-    );
-    return data.value
-      .map(item => ({
-        spId: item.id,
-        name: (item.fields?.teacher || "").trim()
-      }))
-      .filter(t => t.name)
-      .sort((a, b) => a.name.localeCompare(b.name));
   }
+  // NOTE: getWhoAreYouVisiting() (macwalkthroughwhoareyouvisiting) was
+  // removed here — the New Walkthrough teacher directory and Setup →
+  // Teachers now both derive teachers from IEP_Users2 (active, Role
+  // includes Teacher) instead. See TEACHER_DIRECTORY in app.js. That
+  // SharePoint list itself has not been touched or deleted.
 };
