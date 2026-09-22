@@ -353,6 +353,69 @@ const STUDENT_ROSTER = {
   }
 };
 
+/* ── Teacher Directory (live SharePoint "Who Are You Visiting?" list) ────────── */
+//
+// PATCH: MOVE NEW WALKTHROUGH TEACHER DIRECTORY TO SHAREPOINT.
+//
+// Source of truth: macwalkthroughwhoareyouvisiting (field "teacher"), read
+// through the existing GRAPH.getWhoAreYouVisiting() loader — the very same
+// list Setup → Teachers already manages. This is the ONLY teacher source for
+// the primary New Walkthrough page (renderWalkthrough()/_submitWalkthrough()).
+//
+// It is intentionally a small, dedicated, lazily-loaded module rather than
+// SETUP_DATA.teachers: SETUP_DATA.refresh() only ever runs when the Setup
+// page itself is rendered, so it is NOT populated yet when an admin's
+// session lands directly on New Walkthrough (its default landing page).
+// This module follows the same load-on-first-visit / loading / error
+// pattern STUDENT_ROSTER already established for Daily Pulse and PACE.
+//
+// PILOT_TEACHERS / DB.getTeachers() remain untouched and still back the
+// legacy prototype/admin-simulation screens (V2 Walkthrough, Teacher
+// Dashboard, Student Check-In, Form Lab) — see the "LEGACY" comment above
+// PILOT_TEACHERS. Those are a documented follow-up, not part of this patch.
+const TEACHER_DIRECTORY = {
+  _teachers: [],
+  loading:   false,
+  loaded:    false,
+  error:     null,
+
+  async refresh() {
+    this.loading = true;
+    this.error   = null;
+    try {
+      // GRAPH.getWhoAreYouVisiting() already trims/drops blank names and
+      // sorts alphabetically. Collapse duplicate visible names (case/space
+      // insensitive) deterministically — keep whichever row sorts first;
+      // there's no legitimate reason for a second identical entry to be
+      // separately selectable here.
+      const raw  = await GRAPH.getWhoAreYouVisiting();
+      const seen = new Set();
+      const teachers = [];
+      raw.forEach(t => {
+        const key = t.name.trim().toLowerCase();
+        if (!key || seen.has(key)) return;
+        seen.add(key);
+        // SharePoint's own stable list-item id — never a position-derived
+        // or name-derived id, so it survives renames and reordering.
+        teachers.push({ id: t.spId, name: t.name });
+      });
+      this._teachers = teachers;
+      this.loaded = true;
+      // Generic diagnostic only — a count, never the records themselves.
+      console.log(`Teacher directory loaded: ${this._teachers.length} record(s).`);
+    } catch (err) {
+      console.error("Teacher directory load failed:", err.message || String(err));
+      this.error = err.message || "Unable to load the teacher directory.";
+    } finally {
+      this.loading = false;
+    }
+    return this._teachers;
+  },
+
+  getAll()  { return this._teachers; },
+  find(id)  { return this._teachers.find(t => t.id === id) || null; }
+};
+
 /* ── Teacher Context ─────────────────────────────────────────────────────────── */
 
 const TEACHER_IDENTITIES = {
@@ -1904,14 +1967,103 @@ const APP = {
 
   /* ── WALKTHROUGH PAGE ────────────────────────────────────────────────────────── */
 
+  // Shared by renderWalkthrough(): kicks off a teacher-directory load if one
+  // isn't already in flight, and re-renders the page once it settles.
+  // Mirrors _ensureRosterLoading()/STUDENT_ROSTER's established pattern.
+  _ensureTeacherDirectoryLoading(pageName) {
+    if (TEACHER_DIRECTORY.loading) return;
+    TEACHER_DIRECTORY.refresh().then(() => {
+      if (this.currentPage === pageName) this.navigate(pageName);
+    });
+  },
+
+  _teacherDirectoryStatusHtml(title) {
+    if (TEACHER_DIRECTORY.error) {
+      return `
+        <div class="walk-page-header"><h2 class="walk-page-title">${escHtml(title)}</h2></div>
+        <div class="warning-banner">
+          <div>
+            <strong>Teacher directory could not be loaded.</strong><br>
+            ${escHtml(TEACHER_DIRECTORY.error)}
+          </div>
+          <button class="btn btn-secondary btn-sm" id="teacherDirectoryRetry" style="margin-top:10px">Try Again</button>
+        </div>`;
+    }
+    return `
+      <div class="walk-page-header"><h2 class="walk-page-title">${escHtml(title)}</h2></div>
+      <div class="card"><p class="empty-state-text">Loading teacher directory…</p></div>`;
+  },
+
+  // Populates Field 4 (Student) and the "no roster" hint for whichever
+  // teacher is currently selected in the "Who are you visiting?" picker,
+  // from the live production roster (STUDENT_ROSTER / IEP_Students_2026_27)
+  // matched by teacher name — the same linkage Daily Pulse/PACE already use
+  // (STUDENT_ROSTER.getForTeacher()). Called on teacher change, on focus
+  // change, and once more if STUDENT_ROSTER was still loading when the page
+  // first rendered. A teacher with no roster match (new SharePoint teacher
+  // not yet reflected in the roster, or genuinely no students) is not an
+  // error: Whole Class / Small Group stay fully usable, and Individual
+  // Student shows the existing informational hint rather than blocking.
+  _refreshWalkthroughStudentOptions() {
+    const el = document.getElementById("page-walkthrough");
+    if (!el) return;
+    const studentSel  = el.querySelector("#walkthroughStudent");
+    const hint        = el.querySelector("#walkFocusRosterHint");
+    const teacherId   = el.querySelector('[name="teacherId"]')?.value || "";
+    const teacherName = TEACHER_DIRECTORY.find(teacherId)?.name || "";
+    const roster       = teacherName ? STUDENT_ROSTER.getForTeacher(teacherName) : [];
+
+    if (studentSel) {
+      studentSel.innerHTML = !teacherId
+        ? '<option value="">— None / whole class —</option>'
+        : roster.length > 0
+          ? '<option value="">— None / whole class —</option>' +
+            roster.map(s => `<option value="${escHtml(s.id)}">${escHtml(s.name)}</option>`).join("")
+          : '<option value="">— No roster available —</option>';
+    }
+    if (hint) {
+      const focus = el.querySelector('input[name="focus"]:checked')?.value || "";
+      hint.classList.toggle("hidden", !(focus === "individual-student" && !!teacherId && roster.length === 0));
+    }
+  },
+
   renderWalkthrough() {
-    const el         = document.getElementById("page-walkthrough");
+    const el = document.getElementById("page-walkthrough");
+
+    // The "Who are you visiting?" list now comes live from SharePoint
+    // (macwalkthroughwhoareyouvisiting via TEACHER_DIRECTORY) instead of the
+    // hardcoded PILOT_TEACHERS/DB.getTeachers() cache. Load-before-render,
+    // same shape as STUDENT_ROSTER's Daily Pulse/PACE gating — never falls
+    // back to the stale pilot list on failure.
+    if (!TEACHER_DIRECTORY.loaded && !TEACHER_DIRECTORY.error) {
+      el.innerHTML = this._teacherDirectoryStatusHtml("New Walkthrough");
+      this._ensureTeacherDirectoryLoading("walkthrough");
+      return;
+    }
+    if (TEACHER_DIRECTORY.error) {
+      el.innerHTML = this._teacherDirectoryStatusHtml("New Walkthrough");
+      el.querySelector("#teacherDirectoryRetry")?.addEventListener("click", () => {
+        TEACHER_DIRECTORY.error = null;
+        this.renderWalkthrough();
+      });
+      return;
+    }
+    // Individual Student rosters (see Field 4 below) come from the live
+    // production roster (STUDENT_ROSTER / IEP_Students_2026_27), matched by
+    // teacher name — the same linkage Daily Pulse/PACE already use. It's
+    // loaded lazily here too (fire-and-forget: Whole Class/Small Group must
+    // never block on it), re-populating the Student field once it resolves.
+    if (!STUDENT_ROSTER.loaded && !STUDENT_ROSTER.loading) {
+      STUDENT_ROSTER.refresh().then(() => {
+        if (this.currentPage === "walkthrough") this._refreshWalkthroughStudentOptions();
+      });
+    }
+
     const user       = this.getCurrentUser();
-    const allTeachers   = DB.getTeachers();
+    const allTeachers   = TEACHER_DIRECTORY.getAll();
     const allClassrooms = DB.getClassrooms();
     const teachers   = user.isAdmin ? allTeachers   : allTeachers.filter(t => t.id === user.id);
     const classrooms = user.isAdmin ? allClassrooms : allClassrooms.filter(c => c.teacherId === user.id);
-    const availStudents = user.isAdmin ? PILOT_STUDENTS : PILOT_STUDENTS.filter(s => s.teacherId === user.id);
     const today      = new Date().toISOString().slice(0, 10);
     const weekOf     = getWeekOf(today);
 
@@ -1976,12 +2128,14 @@ const APP = {
           </div>
         </div>
 
-        <!-- Field 4: Student (optional) -->
+        <!-- Field 4: Student (optional) — populated from the live roster
+             (STUDENT_ROSTER) once a teacher is selected; see the ss:change
+             handler and _refreshWalkthroughStudentOptions() below. Never
+             pre-populated with every student before a teacher is chosen. -->
         <div class="form-card walk-card section-student">
           <div class="walk-field-label">Student <span class="walk-optional-tag">optional</span></div>
           <select class="form-select" name="studentId" id="walkthroughStudent">
             <option value="">— None / whole class —</option>
-            ${availStudents.map(s => `<option value="${escHtml(s.id)}">${escHtml(s.name)}${user.isAdmin ? "  —  " + escHtml(s.teacherName) : ""}</option>`).join("")}
           </select>
         </div>
 
@@ -2111,18 +2265,10 @@ const APP = {
       updateWalkthroughWeekLabel();
     });
 
-    // Show/hide the "no roster" focus hint based on teacher + focus selection
-    function updateFocusRosterHint() {
-      const hint      = document.getElementById("walkFocusRosterHint");
-      if (!hint) return;
-      const teacherId = el.querySelector('[name="teacherId"]')?.value || "";
-      const ptTeacher = PILOT_TEACHERS.find(t => t.id === teacherId);
-      const hasRoster = (ptTeacher?.students || []).length > 0;
-      const focus     = el.querySelector('input[name="focus"]:checked')?.value || "";
-      hint.classList.toggle("hidden", !(focus === "individual-student" && !hasRoster));
-    }
-
-    // Auto-suggest classroom + filter students when teacher is selected
+    // Auto-suggest classroom (still DB.getClassrooms() — out of scope for
+    // this migration) + populate the live student roster when a teacher is
+    // selected. See _refreshWalkthroughStudentOptions() for the roster/hint
+    // logic, shared with the "roster finished loading late" case above.
     el.querySelector('[data-name="teacherId"]').addEventListener("ss:change", e => {
       const teacherId = e.detail.value;
       const classroomsForTeacher = DB.getClassrooms().filter(c => c.teacherId === teacherId);
@@ -2134,23 +2280,12 @@ const APP = {
           if (opt) opt.click();
         }
       }
-      const studentSel = el.querySelector("#walkthroughStudent");
-      if (studentSel) {
-        const ptTeacher  = PILOT_TEACHERS.find(t => t.id === teacherId);
-        const ptStudents = ptTeacher?.students || [];
-        if (ptStudents.length > 0) {
-          studentSel.innerHTML = '<option value="">— None / whole class —</option>' +
-            ptStudents.map(s => `<option value="${escHtml(s.id)}">${escHtml(s.name)}</option>`).join("");
-        } else {
-          studentSel.innerHTML = '<option value="">— No roster available —</option>';
-        }
-      }
-      updateFocusRosterHint();
+      this._refreshWalkthroughStudentOptions();
     });
 
     // Update hint when focus changes
     el.querySelectorAll('input[name="focus"]').forEach(r =>
-      r.addEventListener("change", updateFocusRosterHint)
+      r.addEventListener("change", () => this._refreshWalkthroughStudentOptions())
     );
 
     // Form submit — named function prevents duplicate bindings across re-renders
@@ -2199,21 +2334,25 @@ const APP = {
     if (saveButton) { saveButton.disabled = true; saveButton.textContent = "Saving…"; }
 
     try {
-      const user          = this.getCurrentUser();
-      const pilotTeacher  = PILOT_TEACHERS.find(t => t.id === teacherId);
-      const rawStudentId  = fd.get("studentId") || "";
-      const pilotStudent  = PILOT_STUDENTS.find(s => s.id === rawStudentId);
-      const submissionId  = ensureWalkthroughSubmissionId();
+      const user             = this.getCurrentUser();
+      // Live SharePoint teacher directory (TEACHER_DIRECTORY) — not
+      // PILOT_TEACHERS. rawStudentId values now come from STUDENT_ROSTER's
+      // own SharePoint item ids (see _refreshWalkthroughStudentOptions()),
+      // not the legacy PILOT_STUDENTS slugs.
+      const directoryTeacher = TEACHER_DIRECTORY.find(teacherId);
+      const rawStudentId     = fd.get("studentId") || "";
+      const rosterStudent    = STUDENT_ROSTER.find(rawStudentId);
+      const submissionId     = ensureWalkthroughSubmissionId();
 
       const responses = {
         date:               document.getElementById("walkthrough-date")?.value || fd.get("date") || new Date().toISOString().slice(0, 10),
         weekOf:             fd.get("weekOf"),
         teacherId,
-        teacherName:        pilotTeacher?.name || "",
+        teacherName:        directoryTeacher?.name || "",
         classroomId,
         focus,
         studentId:          rawStudentId,
-        studentName:        pilotStudent?.name || "",
+        studentName:        rosterStudent?.name || "",
         engagementObserved: engagement,
         supportsObserved:   fd.getAll("supportsObserved"),
         observedWin:        (fd.get("observedWin") || "").trim(),
@@ -2280,9 +2419,8 @@ const APP = {
         console.error("Walkthrough SharePoint sync failed:", err);
       }
 
-      const teachers    = DB.getTeachers();
       const classrooms  = DB.getClassrooms();
-      const t           = teachers.find(x => x.id === teacherId);
+      const t           = TEACHER_DIRECTORY.find(teacherId);
       const c           = classrooms.find(x => x.id === classroomId);
       const statusLabel = CONFIG.CLASSROOM_STATUS_OPTIONS.find(o => o.value === status)?.label || status;
 
@@ -5456,7 +5594,9 @@ const APP = {
           await GRAPH.createListItem(SETUP_LISTS.teachers, { teacher: name });
           showToast(`Teacher "${name}" added.`);
           APP_CACHE.clear("teachers");
-          await SETUP_DATA.refresh();
+          // Refresh the live New Walkthrough directory too, so the new
+          // teacher is selectable there without a redeploy or cache wipe.
+          await Promise.all([SETUP_DATA.refresh(), TEACHER_DIRECTORY.refresh()]);
         } catch (err) { showToast("Failed to add teacher: " + err.message, "error"); }
       });
 
@@ -5475,7 +5615,11 @@ const APP = {
           await GRAPH._patch(`sites/${siteId}/lists/${listId}/items/${spId}`, {});
           showToast(`"${name}" removed.`);
           APP_CACHE.clear("teachers");
-          await SETUP_DATA.refresh();
+          // Removes the teacher from future New Walkthrough selections only.
+          // Historical SharePoint walkthrough records (IEP_Walkthrough_
+          // Observations) already store a plain snapshotted Teacher name and
+          // are never touched by this refresh or by this delete.
+          await Promise.all([SETUP_DATA.refresh(), TEACHER_DIRECTORY.refresh()]);
         } catch (err) { showToast("Failed to remove teacher: " + err.message, "error"); }
       });
 
