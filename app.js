@@ -848,6 +848,7 @@ const REPORTS = {
       this.walkthroughs         = deduplicateWalkthroughReports(normalized);
       this.filteredWalkthroughs = [...this.walkthroughs];
       populateReportsFilterOptions(this.walkthroughs);
+      if (typeof APP !== "undefined" && APP._populateEvidenceTeacherOptions) APP._populateEvidenceTeacherOptions();
       applyReportsFilters();
     } catch (err) {
       console.error("Failed to load walkthrough reports:", err);
@@ -5712,6 +5713,251 @@ const APP = {
     }
   },
 
+  /* ── TEACHER OBSERVATION EVIDENCE REPORT ──────────────────────────────────────
+   * Admin-only (the whole Reports page already requires it — MAC_ADMIN_PANEL_
+   * ALLOWED, enforced by canAccessRoute()/APP.init()). Builds entirely from
+   * REPORTS.walkthroughs, already loaded from IEP_Walkthrough_Observations —
+   * no second SharePoint read, and nothing here ever writes back to SharePoint
+   * or alters a source record. See evidence-report.js for the field mapping
+   * and export builders. */
+
+  _evidenceReportCardHtml() {
+    if (!MAC_ADMIN_PANEL_ALLOWED || typeof EVIDENCE_REPORT === "undefined") return "";
+    return `
+      <div class="report-card evidence-report-card" style="margin-top:20px">
+        <div class="report-card-header">
+          <div>
+            <div class="card-title" style="margin-bottom:4px">Teacher Observation Evidence Report</div>
+            <p style="font-size:13px;color:var(--text-secondary);margin:0">
+              Compile one teacher's saved walkthroughs into an evaluation-ready evidence report. Uses only real stored fields — no ratings are assigned.
+            </p>
+          </div>
+        </div>
+        <div class="filter-row" style="margin-top:12px">
+          <div class="form-field">
+            <label class="form-label">Teacher <span class="req">*</span></label>
+            <select class="form-select" id="er-teacher"><option value="">Select a teacher…</option></select>
+          </div>
+          <div class="form-field">
+            <label class="form-label">Start Date</label>
+            <input class="form-input" type="date" id="er-from">
+          </div>
+          <div class="form-field">
+            <label class="form-label">End Date</label>
+            <input class="form-input" type="date" id="er-to">
+          </div>
+          <div class="form-field">
+            <label class="form-label">Focus</label>
+            <select class="form-select" id="er-focus"><option value="">All</option></select>
+          </div>
+          <div class="form-field" style="display:flex;align-items:flex-end">
+            <label style="display:flex;align-items:center;gap:6px;font-size:13px;font-weight:600">
+              <input type="checkbox" id="er-redact" checked>
+              Redact student names (recommended)
+            </label>
+          </div>
+          <div class="form-field" style="display:flex;align-items:flex-end">
+            <button class="btn btn-primary" id="erGenerateBtn" style="width:100%">Generate Evidence Report</button>
+          </div>
+        </div>
+        <div id="er-result"></div>
+      </div>`;
+  },
+
+  // Union of the live IEP_Users2 teacher directory (so admins pick from a
+  // clean, canonical list) and every distinct teacher name that actually
+  // appears in loaded walkthroughs (so inactive/former teachers with real
+  // history stay reportable — see the patch note this satisfies). Also
+  // populates the Focus filter from whatever focus values actually exist in
+  // the data (most current records won't have one — see the inspection note
+  // in evidence-report.js; the filter just won't offer much until they do).
+  _populateEvidenceTeacherOptions() {
+    const sel = document.getElementById("er-teacher");
+    if (!sel) return;
+    if (!TEACHER_DIRECTORY.loaded && !TEACHER_DIRECTORY.loading) {
+      TEACHER_DIRECTORY.refresh().then(() => {
+        if (this.currentPage === "reports") this._populateEvidenceTeacherOptions();
+      });
+    }
+    const fromDirectory = TEACHER_DIRECTORY.getAll().map(t => t.name);
+    const fromRecords    = REPORTS.walkthroughs.map(r => r.teacher);
+    const names = uniqueSorted([...fromDirectory, ...fromRecords]);
+    const current = sel.value;
+    sel.innerHTML = '<option value="">Select a teacher…</option>' +
+      names.map(n => `<option value="${escHtml(n)}"${current === n ? " selected" : ""}>${escHtml(n)}</option>`).join("");
+
+    const focusSel = document.getElementById("er-focus");
+    if (focusSel) {
+      const focusValues = uniqueSorted(REPORTS.walkthroughs.map(r => r.focus));
+      const currentFocus = focusSel.value;
+      focusSel.innerHTML = '<option value="">All</option>' +
+        focusValues.map(v => `<option value="${escHtml(v)}"${currentFocus === v ? " selected" : ""}>${escHtml(EVIDENCE_REPORT.FOCUS_LABELS[v] || v)}</option>`).join("");
+    }
+  },
+
+  _bindEvidenceReportCard() {
+    document.getElementById("erGenerateBtn")?.addEventListener("click", () => this._generateEvidenceReport());
+  },
+
+  _generateEvidenceReport() {
+    const teacher = document.getElementById("er-teacher")?.value || "";
+    if (!teacher) { showToast("Select a teacher first.", "error"); return; }
+    const from   = document.getElementById("er-from")?.value || "";
+    const to     = document.getElementById("er-to")?.value || "";
+    const focus  = document.getElementById("er-focus")?.value || "";
+    const redact = document.getElementById("er-redact")?.checked !== false;
+
+    const records = EVIDENCE_REPORT.selectRecords(REPORTS.walkthroughs, { teacher, from, to, focus });
+    const entries = EVIDENCE_REPORT.buildEntries(records, { redactStudents: redact });
+    const summary = EVIDENCE_REPORT.summarize(entries, { teacher, from, to });
+    this._evidenceReport = { entries, summary, redact };
+    this._evidenceReportView = "preview";
+    this._renderEvidenceReportResult();
+  },
+
+  _renderEvidenceReportResult() {
+    const el = document.getElementById("er-result");
+    if (!el) return;
+    const state = this._evidenceReport;
+    if (!state) { el.innerHTML = ""; return; }
+    const { entries, summary } = state;
+    const view = this._evidenceReportView || "preview";
+
+    const tabsHtml = `
+      <div class="evidence-tabs">
+        <button type="button" class="btn btn-secondary btn-sm${view === "preview" ? " active" : ""}" id="erTabPreview">Evidence Preview</button>
+        <button type="button" class="btn btn-secondary btn-sm${view === "paetep" ? " active" : ""}" id="erTabPaEtep">PA-ETEP Copy View</button>
+        <span style="flex:1"></span>
+        <button type="button" class="btn btn-secondary btn-sm" id="erExportDocx">Word (.docx)</button>
+        <button type="button" class="btn btn-secondary btn-sm" id="erExportCsv">CSV</button>
+      </div>`;
+
+    const summaryHtml = `
+      <div class="evidence-summary">
+        <div><strong>${escHtml(summary.teacherName)}</strong></div>
+        <div>Observer(s): ${escHtml(summary.observers.join(", ") || "Not recorded")}</div>
+        <div>Report Period: ${escHtml(summary.periodLabel)}</div>
+        <div><strong>${summary.count}</strong> observation${summary.count !== 1 ? "s" : ""}</div>
+      </div>`;
+
+    if (!entries.length) {
+      el.innerHTML = tabsHtml + summaryHtml +
+        `<div class="empty-state"><div class="empty-icon">🔎</div><p>No walkthrough observations match these filters.</p></div>`;
+      this._bindEvidenceReportResult();
+      return;
+    }
+
+    el.innerHTML = tabsHtml + summaryHtml + (view === "paetep" ? this._evidencePaEtepHtml(entries, summary) : this._evidencePreviewHtml(entries, summary));
+    this._bindEvidenceReportResult();
+  },
+
+  _evidencePreviewHtml(entries, summary) {
+    const groups = EVIDENCE_REPORT.groupByCategory(entries);
+    const row = (label, value) => value ? `<div class="detail-row"><span class="detail-label">${escHtml(label)}</span><span class="detail-value">${escHtml(value)}</span></div>` : "";
+    return `
+      <div class="evidence-chronological">
+        ${entries.map(e => `
+          <div class="card evidence-entry-card">
+            <div class="card-title">${escHtml(e.dateLabel)}${e.time ? " · " + escHtml(e.time) : ""}</div>
+            ${row("Observer", e.observer)}
+            ${row("Classroom", e.classroom)}
+            ${row("Focus", e.focusLabel)}
+            ${row("Student", e.student)}
+            ${row("Engagement", e.engagementLabel)}
+            ${e.supports.length ? row("Supports Observed", e.supports.join(", ")) : ""}
+            ${e.disengagementReasons.length ? row("Disengagement Reasons", e.disengagementReasons.join(", ")) : ""}
+            ${row("Support Requested", e.supportRequestedLabel)}
+            ${row("Observed Win", e.observedWin)}
+            ${row("Concern / Gap", e.concernGap)}
+            ${row("Observation Notes", e.notes)}
+            ${row("Follow-Up Notes", e.followUpNotes)}
+            ${e.followUpNeeded ? row("Follow-Up Needed", "Yes") : ""}
+          </div>`).join("")}
+      </div>
+      <div class="card evidence-category-card" style="margin-top:16px">
+        <div class="card-title">Evidence by Category</div>
+        <p class="form-help">Regrouped from this teacher's "Supports Observed" selections above — a relabeling of checked items, not a domain rating or evaluation score.</p>
+        ${groups.length ? groups.map(g => `
+          <div class="evidence-category-group">
+            <div class="detail-section-title">${escHtml(g.category)}</div>
+            ${g.items.map(i => `<div class="detail-row"><span class="detail-value">${escHtml(i.dateLabel)} — ${escHtml(i.supports.join(", "))}</span></div>`).join("")}
+          </div>`).join("") : `<p class="empty-state-text">No Supports Observed entries recorded for this period.</p>`}
+      </div>`;
+  },
+
+  _evidencePaEtepHtml(entries, summary) {
+    const { sections } = EVIDENCE_REPORT.buildPaEtepSections(entries, summary);
+    this._evidencePaEtepSections = sections; // read by the copy handlers below
+    return `
+      <div class="evidence-paetep">
+        <div style="text-align:right;margin-bottom:8px">
+          <button type="button" class="btn btn-secondary btn-sm" id="erCopyAll">Copy All</button>
+        </div>
+        ${sections.map((s, i) => `
+          <div class="card evidence-paetep-section" style="margin-bottom:12px">
+            <div class="report-card-header">
+              <div class="card-title" style="margin:0">${escHtml(s.title)}</div>
+              <button type="button" class="btn btn-secondary btn-sm evidence-copy-btn" data-section-index="${i}">Copy</button>
+            </div>
+            <pre class="evidence-paetep-text">${escHtml(s.text)}</pre>
+          </div>`).join("")}
+      </div>`;
+  },
+
+  _bindEvidenceReportResult() {
+    document.getElementById("erTabPreview")?.addEventListener("click", () => { this._evidenceReportView = "preview"; this._renderEvidenceReportResult(); });
+    document.getElementById("erTabPaEtep")?.addEventListener("click", () => { this._evidenceReportView = "paetep"; this._renderEvidenceReportResult(); });
+
+    document.getElementById("erExportDocx")?.addEventListener("click", () => {
+      const state = this._evidenceReport;
+      if (!state || !state.entries.length) { showToast("No observations match these filters — nothing to export.", "error"); return; }
+      try {
+        const bytes = EVIDENCE_REPORT.buildDocx(state.entries, state.summary);
+        downloadFile(EVIDENCE_REPORT.buildFilename("docx", state.summary), bytes, "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+        showToast("Evidence report exported.");
+      } catch (err) { showToast("Export failed: " + (err.message || "unknown error"), "error"); }
+    });
+    document.getElementById("erExportCsv")?.addEventListener("click", () => {
+      const state = this._evidenceReport;
+      if (!state || !state.entries.length) { showToast("No observations match these filters — nothing to export.", "error"); return; }
+      const csv = EVIDENCE_REPORT.buildCsv(state.entries);
+      downloadFile(EVIDENCE_REPORT.buildFilename("csv", state.summary), csv, "text/csv;charset=utf-8");
+      showToast("Evidence report exported.");
+    });
+
+    document.getElementById("erCopyAll")?.addEventListener("click", () => {
+      const { allText } = EVIDENCE_REPORT.buildPaEtepSections(this._evidenceReport.entries, this._evidenceReport.summary);
+      this._copyToClipboard(allText, "All sections copied.");
+    });
+    document.querySelectorAll(".evidence-copy-btn").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const section = this._evidencePaEtepSections?.[Number(btn.dataset.sectionIndex)];
+        if (section) this._copyToClipboard(section.text, `"${section.title}" copied.`);
+      });
+    });
+  },
+
+  _copyToClipboard(text, successMessage) {
+    const done = () => showToast(successMessage || "Copied.");
+    const fail = () => showToast("Could not copy — select and copy the text manually.", "error");
+    if (navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(text).then(done, fail);
+      return;
+    }
+    // Older/insecure-context fallback.
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand("copy");
+      ta.remove();
+      ok ? done() : fail();
+    } catch (err) { fail(); }
+  },
+
   /* ── REPORTS ────────────────────────────────────────────────────────────────── */
 
   renderReports() {
@@ -5787,6 +6033,8 @@ const APP = {
 
       <div id="reports-summary"></div>
 
+      ${this._evidenceReportCardHtml()}
+
       <div class="report-card student-check-status-card" style="margin-top:20px">
         <div class="report-card-header">
           <div>
@@ -5822,11 +6070,13 @@ const APP = {
     document.getElementById("refreshReportsBtn").addEventListener("click", () => REPORTS.load());
     document.getElementById("report-modal-close").addEventListener("click", closeReportDetailModal);
     document.getElementById("report-modal-backdrop").addEventListener("click", closeReportDetailModal);
+    this._bindEvidenceReportCard();
 
     this._renderCheckStatusPanels();
 
     if (REPORTS.walkthroughs.length > 0) {
       populateReportsFilterOptions(REPORTS.walkthroughs);
+      this._populateEvidenceTeacherOptions();
       applyReportsFilters();
     } else if (REPORTS.error) {
       renderReportsErrorState(REPORTS.error);

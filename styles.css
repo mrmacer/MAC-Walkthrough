@@ -4137,3 +4137,49 @@ tbody tr:hover td { background: var(--color-primary-light); }
 .page-header .setup-refresh-btn {
   margin-top: 12px;
 }
+
+/* ── Teacher Observation Evidence Report ──────────────────────────────────── */
+
+.evidence-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  margin: 14px 0;
+  padding: 10px 14px;
+  background: #f8fafc;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+.evidence-summary strong { color: var(--text-primary, #1e293b); }
+
+.evidence-tabs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 14px;
+}
+.evidence-tabs .btn.active {
+  background: var(--color-primary, #2563eb);
+  color: #fff;
+  border-color: transparent;
+}
+
+.evidence-entry-card { margin-bottom: 12px; }
+.evidence-category-group { margin-bottom: 14px; }
+.evidence-category-group:last-child { margin-bottom: 0; }
+
+.evidence-paetep-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.5;
+  background: #f8fafc;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  margin: 8px 0 0;
+}
