@@ -2087,27 +2087,17 @@ const APP = {
       });
     }
 
-    const user       = this.getCurrentUser();
-    const allTeachers   = TEACHER_DIRECTORY.getAll();
-    const allClassrooms = DB.getClassrooms();
-    const teachers   = user.isAdmin ? allTeachers   : allTeachers.filter(t => t.id === user.id);
-    const classrooms = user.isAdmin ? allClassrooms : allClassrooms.filter(c => c.teacherId === user.id);
-    const today      = new Date().toISOString().slice(0, 10);
-    const weekOf     = getWeekOf(today);
-
-    const noClassrooms = classrooms.length === 0;
+    const user        = this.getCurrentUser();
+    const allTeachers  = TEACHER_DIRECTORY.getAll();
+    const teachers     = user.isAdmin ? allTeachers : allTeachers.filter(t => t.id === user.id);
+    const today        = new Date().toISOString().slice(0, 10);
+    const weekOf       = getWeekOf(today);
 
     el.innerHTML = `
       <div class="walk-page-header">
         <h2 class="walk-page-title">New Walkthrough</h2>
         <p class="walk-page-sub">Capture classroom support observations quickly and consistently.</p>
       </div>
-
-      ${noClassrooms ? `
-        <div class="warning-banner" style="margin-bottom:16px">
-          <svg viewBox="0 0 20 20" fill="currentColor" width="18" height="18" style="flex-shrink:0"><path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd"/></svg>
-          <div>Add at least one classroom in <a href="#setup" style="color:var(--orange);font-weight:700">Setup</a> before recording walkthroughs.</div>
-        </div>` : ""}
 
       <div id="walkthroughConfirm" class="hidden"></div>
 
@@ -2132,16 +2122,7 @@ const APP = {
           )}
         </div>
 
-        <!-- Field 2: Classroom -->
-        <div class="form-card walk-card section-classroom">
-          <div class="walk-field-label">Classroom <span class="req">*</span></div>
-          ${this._buildSearchSelect(
-            classrooms.map(c => ({ value: c.id, label: c.name + (c.roomNumber ? "  ·  Room " + c.roomNumber : "") })),
-            "Search classrooms…", "classroomId", true
-          )}
-        </div>
-
-        <!-- Field 3: Focus -->
+        <!-- Field 2: Focus -->
         <div class="form-card walk-card section-focus">
           <div class="walk-field-label">Focus <span class="req">*</span></div>
           <div class="option-cards">
@@ -2156,7 +2137,7 @@ const APP = {
           </div>
         </div>
 
-        <!-- Field 4: Student (optional) — populated from the live roster
+        <!-- Field 3: Student (optional) — populated from the live roster
              (STUDENT_ROSTER) once a teacher is selected; see the ss:change
              handler and _refreshWalkthroughStudentOptions() below. Never
              pre-populated with every student before a teacher is chosen. -->
@@ -2167,7 +2148,7 @@ const APP = {
           </select>
         </div>
 
-        <!-- Field 5: Engagement Observed -->
+        <!-- Field 4: Engagement Observed -->
         <div class="form-card walk-card section-engagement">
           <div class="walk-field-label">Engagement Observed <span class="req">*</span></div>
           <div class="option-cards">
@@ -2179,7 +2160,7 @@ const APP = {
           </div>
         </div>
 
-        <!-- Field 6: Supports Observed -->
+        <!-- Field 5: Supports Observed -->
         <div class="form-card walk-card section-supports">
           <div class="walk-field-label">Supports Observed <span class="walk-optional-tag">optional</span></div>
           <div class="chip-grid">
@@ -2191,21 +2172,21 @@ const APP = {
           </div>
         </div>
 
-        <!-- Field 7: Observed Win -->
+        <!-- Field 6: Observed Win -->
         <div class="form-card walk-card section-win">
           <div class="walk-field-label">One Observed Win <span class="walk-optional-tag">optional</span></div>
           <textarea class="form-textarea" name="observedWin"
             placeholder="What went well in this classroom?" rows="2"></textarea>
         </div>
 
-        <!-- Field 8: Concern or Gap -->
+        <!-- Field 7: Concern or Gap -->
         <div class="form-card walk-card section-concern">
           <div class="walk-field-label">One Concern or Gap <span class="walk-optional-tag">optional</span></div>
           <textarea class="form-textarea" name="concernGap"
             placeholder="Any patterns or gaps worth noting?" rows="2"></textarea>
         </div>
 
-        <!-- Field 9: Support Needed -->
+        <!-- Field 8: Support Needed -->
         <div class="form-card walk-card section-support-needed">
           <div class="walk-field-label">Support Needed <span class="req">*</span></div>
           <div class="option-cards option-cards-col">
@@ -2228,7 +2209,7 @@ const APP = {
           </div>
         </div>
 
-        <!-- Field 10: Classroom Status -->
+        <!-- Field 9: Classroom Status -->
         <div class="form-card walk-card">
           <div class="walk-field-label">Classroom Status <span class="req">*</span></div>
           <div class="option-cards">
@@ -2251,7 +2232,7 @@ const APP = {
           </div>
         </div>
 
-        <!-- Field 11: Follow-Up Notes -->
+        <!-- Field 10: Follow-Up Notes -->
         <div class="form-card walk-card">
           <div class="walk-field-label">Follow-Up Notes <span class="walk-optional-tag">optional</span></div>
           <textarea class="form-textarea" name="followUpNotes"
@@ -2293,21 +2274,12 @@ const APP = {
       updateWalkthroughWeekLabel();
     });
 
-    // Auto-suggest classroom (still DB.getClassrooms() — out of scope for
-    // this migration) + populate the live student roster when a teacher is
-    // selected. See _refreshWalkthroughStudentOptions() for the roster/hint
-    // logic, shared with the "roster finished loading late" case above.
-    el.querySelector('[data-name="teacherId"]').addEventListener("ss:change", e => {
-      const teacherId = e.detail.value;
-      const classroomsForTeacher = DB.getClassrooms().filter(c => c.teacherId === teacherId);
-      if (classroomsForTeacher.length === 1) {
-        const classroomWrap = el.querySelector('[data-name="classroomId"]');
-        const hiddenInput   = classroomWrap.querySelector(".ss-value");
-        if (!hiddenInput.value) {
-          const opt = classroomWrap.querySelector(`.ss-option[data-value="${classroomsForTeacher[0].id}"]`);
-          if (opt) opt.click();
-        }
-      }
+    // Populate the live student roster when a teacher is selected. See
+    // _refreshWalkthroughStudentOptions() for the roster/hint logic, shared
+    // with the "roster finished loading late" case above. (Classroom used to
+    // be auto-suggested here too — removed along with the Classroom field
+    // itself; New Walkthrough no longer collects a classroom at all.)
+    el.querySelector('[data-name="teacherId"]').addEventListener("ss:change", () => {
       this._refreshWalkthroughStudentOptions();
     });
 
@@ -2333,7 +2305,6 @@ const APP = {
     const fd   = new FormData(form);
 
     const teacherId   = form.querySelector('[name="teacherId"]').value;
-    const classroomId = form.querySelector('[name="classroomId"]').value;
     const focus       = fd.get("focus");
     const engagement  = fd.get("engagementObserved");
     const support     = fd.get("supportNeeded");
@@ -2341,7 +2312,6 @@ const APP = {
 
     const errors = [];
     if (!teacherId)   errors.push("Please select a teacher.");
-    if (!classroomId) errors.push("Please select a classroom.");
     if (!focus)       errors.push("Please select an observation focus.");
     if (!engagement)  errors.push("Please select engagement observed.");
     if (!support)     errors.push("Please select support needed.");
@@ -2377,7 +2347,11 @@ const APP = {
         weekOf:             fd.get("weekOf"),
         teacherId,
         teacherName:        directoryTeacher?.name || "",
-        classroomId,
+        // New Walkthrough no longer collects a classroom — kept as an empty
+        // string (never invented/guessed) rather than dropped, so legacy
+        // local-record consumers (e.g. Teacher Dashboard, Storage exports)
+        // that still read responses.classroomId keep working unchanged.
+        classroomId:        "",
         focus,
         studentId:          rawStudentId,
         studentName:        rosterStudent?.name || "",
@@ -2396,7 +2370,6 @@ const APP = {
 
       DB.addRecord(responses);
 
-      const classroomName = DB.getClassrooms().find(x => x.id === classroomId)?.name || "";
       const _now = new Date();
       const spPayload = {
         SubmissionID:         submissionId,
@@ -2407,7 +2380,12 @@ const APP = {
         Observer:             responses.submittedByName     || "",
         Teacher:              responses.teacherName         || "",
         StudentName:          responses.studentName         || "",
-        Classroom:            classroomName,
+        // Not collected any more — sent blank, never guessed from the
+        // teacher name or filled with placeholder text (e.g. "N/A"). If
+        // SharePoint's Classroom column is ever set to Required, this save
+        // will fail with a real, visible Graph error rather than silently
+        // writing fake data.
+        Classroom:            "",
         Focus:                responses.focus               || "",
         ClassroomStatus:      responses.classroomStatus     || "",
         Engagement:           responses.engagementObserved  || "",
@@ -2447,9 +2425,7 @@ const APP = {
         console.error("Walkthrough SharePoint sync failed:", err);
       }
 
-      const classrooms  = DB.getClassrooms();
       const t           = TEACHER_DIRECTORY.find(teacherId);
-      const c           = classrooms.find(x => x.id === classroomId);
       const statusLabel = CONFIG.CLASSROOM_STATUS_OPTIONS.find(o => o.value === status)?.label || status;
 
       const syncLine = spSynced
@@ -2462,7 +2438,7 @@ const APP = {
       confirmEl.innerHTML = `
         <div class="save-confirm-check">✓</div>
         <h3>Walkthrough Saved</h3>
-        <p><strong>${t ? escHtml(t.name) : "—"}</strong> · ${c ? escHtml(c.name) : "—"}</p>
+        <p><strong>${t ? escHtml(t.name) : "—"}</strong></p>
         <p>${fmtDate(responses.date + "T12:00:00")} &nbsp;·&nbsp; ${CONFIG.STATUS_EMOJI[status] || ""} ${escHtml(statusLabel)}</p>
         ${syncLine}
         <div class="confirm-actions">
@@ -5960,6 +5936,12 @@ const APP = {
 
   /* ── REPORTS ────────────────────────────────────────────────────────────────── */
 
+  // Student Check-In Status is intentionally hidden below — Student Check-In
+  // hasn't launched yet. Its data collection, DB.getStudentChecks(), and
+  // _renderCheckStatusPanels() are all untouched; only this Reports
+  // presentation block (and the call to that function, further down) is
+  // removed. Restore by re-adding the card markup this comment replaced and
+  // uncommenting the this._renderCheckStatusPanels() call below.
   renderReports() {
     const el = document.getElementById("page-reports");
     el.innerHTML = `
@@ -6035,16 +6017,6 @@ const APP = {
 
       ${this._evidenceReportCardHtml()}
 
-      <div class="report-card student-check-status-card" style="margin-top:20px">
-        <div class="report-card-header">
-          <div>
-            <div class="card-title" style="margin-bottom:4px">Student Check-In Status</div>
-            <p style="font-size:13px;color:var(--text-secondary);margin:0">Schoolwide green/yellow/red trends from student check-ins.</p>
-          </div>
-        </div>
-        <div id="student-check-status-report" class="check-status-grid"></div>
-      </div>
-
       <div id="walkthrough-reports-container" style="margin-top:20px"></div>
 
       <div id="report-detail-modal" class="report-modal hidden" role="dialog" aria-modal="true">
@@ -6072,7 +6044,8 @@ const APP = {
     document.getElementById("report-modal-backdrop").addEventListener("click", closeReportDetailModal);
     this._bindEvidenceReportCard();
 
-    this._renderCheckStatusPanels();
+    // this._renderCheckStatusPanels() intentionally not called — see the
+    // "Student Check-In Status is intentionally hidden" comment above.
 
     if (REPORTS.walkthroughs.length > 0) {
       populateReportsFilterOptions(REPORTS.walkthroughs);
@@ -6087,6 +6060,11 @@ const APP = {
     }
   },
 
+  // Not currently called from renderReports() — Student Check-In hasn't
+  // launched, so its Reports section is hidden (see the comment there).
+  // Left intact and functional so re-enabling it later is a one-line change;
+  // it stays a harmless no-op (immediately returns) as long as
+  // #student-check-status-report isn't in the page.
   _renderCheckStatusPanels() {
     const container = document.getElementById("student-check-status-report");
     if (!container) return;
