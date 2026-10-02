@@ -172,7 +172,7 @@ async function submitsWithClassroomBlankAndNeverInventsAValue() {
 
   const formData = {
     focus: "whole-class", engagementObserved: "engaged-independently", supportNeeded: "none",
-    classroomStatus: "on-track", date: "2026-09-24", weekOf: "2026-W39", studentId: "",
+    classroomStatus: "on-track", date: "2026-09-24", weekOf: "2026-W39", studentName: "",
     observedWin: "", concernGap: "", followUpNotes: "", supportsObserved: []
   };
   context.FormData = class {
@@ -212,44 +212,17 @@ async function submitsWithClassroomBlankAndNeverInventsAValue() {
   assert.equal(payload.Focus, "whole-class");
 }
 
-async function individualStudentLookupStillDependsOnlyOnTeacher() {
-  const { context, document } = makeContext();
-  const APP = vm.runInContext("APP", context);
-  const STUDENT_ROSTER = vm.runInContext("STUDENT_ROSTER", context);
-  const TEACHER_DIRECTORY = vm.runInContext("TEACHER_DIRECTORY", context);
-  await STUDENT_ROSTER.refresh();
-  TEACHER_DIRECTORY._teachers = [{ id: "u1", name: "Amber Bossons" }];
-  TEACHER_DIRECTORY.loaded = true;
-
-  const studentSel = { innerHTML: "" };
-  const hint = { _hidden: true, classList: { toggle(cls, on) { if (cls === "hidden") hint._hidden = !!on; } } };
-  document.registry["page-walkthrough"] = {
-    querySelector(sel) {
-      if (sel === '[name="teacherId"]') return { value: "u1" };
-      if (sel === "#walkthroughStudent") return studentSel;
-      if (sel === "#walkFocusRosterHint") return hint;
-      if (sel === 'input[name="focus"]:checked') return { value: "individual-student" };
-      return null;
-    }
-  };
-  APP._refreshWalkthroughStudentOptions();
-  assert.match(studentSel.innerHTML, /Jane Doe/, "item 9: roster resolves purely from the selected teacher");
-
-  const fnSrc = app.slice(app.indexOf("_refreshWalkthroughStudentOptions() {"), app.indexOf("_refreshWalkthroughStudentOptions() {") + 2000);
-  assert.ok(!/classroom/i.test(fnSrc), "item 9: no classroom reference anywhere in the roster-lookup function");
-
-  // item 10: Whole Class / Small Group still fine with zero roster match.
-  document.registry["page-walkthrough"] = {
-    querySelector(sel) {
-      if (sel === '[name="teacherId"]') return { value: "no-such-teacher" };
-      if (sel === "#walkthroughStudent") return studentSel;
-      if (sel === "#walkFocusRosterHint") return hint;
-      if (sel === 'input[name="focus"]:checked') return { value: "whole-class" };
-      return null;
-    }
-  };
-  APP._refreshWalkthroughStudentOptions();
-  assert.equal(hint._hidden, true, "Whole Class stays unblocked with no roster match");
+// Student is now free text (see tests/walkthrough-student-text.test.js) —
+// it depends on neither Classroom nor the roster, so item 9/10 reduce to:
+// the Student field never references a classroom, and Whole Class works
+// with nothing typed.
+function studentFieldHasNoClassroomCoupling() {
+  const { document } = makeRenderedWalkthroughPage();
+  const html = document.registry["page-walkthrough"].innerHTML;
+  const card = html.slice(html.indexOf("section-student"), html.indexOf("section-engagement"));
+  assert.match(card, /<input type="text"[^>]*name="studentName"/, "item 9: Student is a free-text input");
+  assert.ok(!/classroom/i.test(card.replace(/Students move between\s+classrooms/, "")), "item 9: no classroom reference in the Student field");
+  assert.ok(!/_refreshWalkthroughStudentOptions/.test(app), "item 10: no roster lookup function left to block Whole Class");
 }
 
 /* ── historical Classroom data stays fully supported elsewhere ───────────── */
@@ -284,7 +257,7 @@ function noCouplingIntroducedToDailyPulseOrPace() {
 const tests = {
   checkInStatusIsHiddenButEvidenceReportAndReportsStillWork, studentCheckStorageIsUntouched,
   classroomSelectorIsGone, validationNoLongerRequiresClassroomButKeepsTeacherAndFocus,
-  submitsWithClassroomBlankAndNeverInventsAValue, individualStudentLookupStillDependsOnlyOnTeacher,
+  submitsWithClassroomBlankAndNeverInventsAValue, studentFieldHasNoClassroomCoupling,
   historicalClassroomStillNormalizesAndFilters, evidenceReportStillHandlesHistoricalClassroom,
   noCouplingIntroducedToDailyPulseOrPace
 };

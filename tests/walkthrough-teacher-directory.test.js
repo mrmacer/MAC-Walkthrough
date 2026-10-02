@@ -220,69 +220,34 @@ function renderErrorNeverFallsBackToPilotTeachers() {
   assert.ok(!/PILOT_TEACHERS\.find|DB\.getTeachers\(\)/.test(fnCode), "no DB.getTeachers()/PILOT_TEACHERS fallback anywhere in renderWalkthrough's actual code — item 9");
 }
 
-async function individualStudentRosterLinkageBridgesNameFormats() {
-  const { context, document } = makeContext();
-  const STUDENT_ROSTER    = vm.runInContext("STUDENT_ROSTER", context);
-  const TEACHER_DIRECTORY = vm.runInContext("TEACHER_DIRECTORY", context);
+// The live New Walkthrough Student field is now free text (see
+// tests/walkthrough-student-text.test.js), so it no longer bridges
+// IEP_Users2 names to roster names. resolveCanonicalTeacherValue() is still
+// used by Setup → Students' Add Student "Teacher" dropdown, so its
+// "Amber Bossons" → "Bossons, A" bridge must keep working there.
+async function rosterTeacherNameBridgeStillWorksForSetup() {
+  const { context } = makeContext();
+  const STUDENT_ROSTER = vm.runInContext("STUDENT_ROSTER", context);
   await STUDENT_ROSTER.refresh();
-  await TEACHER_DIRECTORY.refresh();
-
-  const bossons = TEACHER_DIRECTORY.getAll().find(t => t.name === "Amber Bossons");
-  const studentSel = { innerHTML: "" };
-  const hint = { _hidden: true, classList: { toggle(cls, on) { if (cls === "hidden") hint._hidden = !!on; } } };
-  document.registry["page-walkthrough"] = {
-    querySelector(sel) {
-      if (sel === '[name="teacherId"]') return { value: bossons.id };
-      if (sel === "#walkthroughStudent") return studentSel;
-      if (sel === "#walkFocusRosterHint") return hint;
-      if (sel === 'input[name="focus"]:checked') return { value: "individual-student" };
-      return null;
-    }
-  };
-  const APP = vm.runInContext("APP", context);
-  APP._refreshWalkthroughStudentOptions();
-
-  // "Amber Bossons" (IEP_Users2) must resolve to "Bossons, A" (the roster's
-  // own canonical value) to find these students — item 13.
-  assert.match(studentSel.innerHTML, /Jane Doe/);
-  assert.match(studentSel.innerHTML, /Sam Rivera/);
-  assert.equal(hint._hidden, true, "roster match found, so the hint stays hidden");
+  const resolve = vm.runInContext("resolveCanonicalTeacherValue", context);
+  assert.equal(resolve("Amber Bossons", STUDENT_ROSTER.getAll()), "Bossons, A");
+  assert.equal(STUDENT_ROSTER.getForTeacher("Bossons, A").length, 2);
 }
 
-async function wholeClassAndSmallGroupWorkWithNoRosterMatch() {
-  const { context, document } = makeContext();
-  const STUDENT_ROSTER    = vm.runInContext("STUDENT_ROSTER", context);
+function walkthroughRendersWithoutAnyRosterMatch() {
+  const { context, document, calls } = makeContext();
   const TEACHER_DIRECTORY = vm.runInContext("TEACHER_DIRECTORY", context);
-  await STUDENT_ROSTER.refresh();
-  await TEACHER_DIRECTORY.refresh();
-  const stock = TEACHER_DIRECTORY.getAll().find(t => t.name === "Nikki Stock"); // no roster match, per fixture
-
+  TEACHER_DIRECTORY._teachers = [{ id: "u2", name: "Nikki Stock" }]; // no roster match, per fixture
+  TEACHER_DIRECTORY.loaded = true;
   const APP = vm.runInContext("APP", context);
-  function run(focusValue) {
-    const studentSel = { innerHTML: "" };
-    const hint = { _hidden: true, classList: { toggle(cls, on) { if (cls === "hidden") hint._hidden = !!on; } } };
-    document.registry["page-walkthrough"] = {
-      querySelector(sel) {
-        if (sel === '[name="teacherId"]') return { value: stock.id };
-        if (sel === "#walkthroughStudent") return studentSel;
-        if (sel === "#walkFocusRosterHint") return hint;
-        if (sel === 'input[name="focus"]:checked') return focusValue ? { value: focusValue } : null;
-        return null;
-      }
-    };
-    APP._refreshWalkthroughStudentOptions();
-    return { studentSel, hint };
-  }
-
-  for (const focus of ["whole-class", "small-group", ""]) {
-    const { studentSel, hint } = run(focus);
-    assert.match(studentSel.innerHTML, /No roster available/);
-    assert.equal(hint._hidden, true, `focus="${focus}" must stay fully usable — item 14`);
-  }
-  const { hint: individualHint } = run("individual-student");
-  assert.equal(individualHint._hidden, false, "Individual Student shows the informational hint, but this is not a submit blocker");
+  APP.currentPage = "walkthrough";
+  APP.renderWalkthrough();
+  const html = document.registry["page-walkthrough"].innerHTML;
+  assert.match(html, /<input type="text"[^>]*name="studentName"/, "Student is a free-text input");
+  assert.ok(!/No roster available|No student roster has been added/.test(html), "no roster-dependent UI — item 14");
+  assert.ok(!calls.getListItems.includes("IEP_Students_2026_27"), "rendering New Walkthrough never loads the student roster");
   const submitFn = app.slice(app.indexOf("async _submitWalkthrough(pageEl)"), app.indexOf("async _submitWalkthrough(pageEl)") + 1500);
-  assert.ok(!/studentId/.test(submitFn.slice(0, submitFn.indexOf("const responses"))), "Student is never a required field");
+  assert.ok(!/student/i.test(submitFn.slice(0, submitFn.indexOf("const responses"))), "Student is never a required field");
 }
 
 /* ── layer 3: Setup → Teachers, read-only ─────────────────────────────────── */
@@ -345,7 +310,7 @@ function noCouplingIntroducedToDailyPulseOrPace() {
 const tests = {
   directorySourcesFromIepUsers2, activeTeacherRoleFiltering, dedupedAndAlphabetized,
   renderSuccessUsesTeacherDirectoryOnly, renderErrorNeverFallsBackToPilotTeachers,
-  individualStudentRosterLinkageBridgesNameFormats, wholeClassAndSmallGroupWorkWithNoRosterMatch,
+  rosterTeacherNameBridgeStillWorksForSetup, walkthroughRendersWithoutAnyRosterMatch,
   setupTeachersIsReadOnly, setupTeachersNeverTouchesTheOldList, staticNoWritesToOldListAnywhere,
   noCouplingIntroducedToDailyPulseOrPace
 };

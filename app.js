@@ -2016,45 +2016,6 @@ const APP = {
       <div class="card"><p class="empty-state-text">Loading teacher directory…</p></div>`;
   },
 
-  // Populates Field 4 (Student) and the "no roster" hint for whichever
-  // teacher is currently selected in the "Who are you visiting?" picker,
-  // from the live production roster (STUDENT_ROSTER / IEP_Students_2026_27).
-  // TEACHER_DIRECTORY names are IEP_Users2 display names (e.g. "Amber
-  // Bossons"); the roster's own Teacher column uses a different canonical
-  // format (e.g. "Bossons, A"). resolveCanonicalTeacherValue() — the same
-  // helper Setup → Students' Add Student "Teacher" dropdown already uses —
-  // bridges the two by reusing an existing roster record's exact value
-  // where one exists, rather than guessing a transformation here. Called on
-  // teacher change, on focus change, and once more if STUDENT_ROSTER was
-  // still loading when the page first rendered. A teacher with no roster
-  // match (new user not yet reflected in the roster, or genuinely no
-  // students) is not an error: Whole Class / Small Group stay fully usable,
-  // and Individual Student shows the existing informational hint rather
-  // than blocking.
-  _refreshWalkthroughStudentOptions() {
-    const el = document.getElementById("page-walkthrough");
-    if (!el) return;
-    const studentSel  = el.querySelector("#walkthroughStudent");
-    const hint        = el.querySelector("#walkFocusRosterHint");
-    const teacherId   = el.querySelector('[name="teacherId"]')?.value || "";
-    const teacherName = TEACHER_DIRECTORY.find(teacherId)?.name || "";
-    const rosterTeacherName = teacherName ? resolveCanonicalTeacherValue(teacherName, STUDENT_ROSTER.getAll()) : "";
-    const roster       = rosterTeacherName ? STUDENT_ROSTER.getForTeacher(rosterTeacherName) : [];
-
-    if (studentSel) {
-      studentSel.innerHTML = !teacherId
-        ? '<option value="">— None / whole class —</option>'
-        : roster.length > 0
-          ? '<option value="">— None / whole class —</option>' +
-            roster.map(s => `<option value="${escHtml(s.id)}">${escHtml(s.name)}</option>`).join("")
-          : '<option value="">— No roster available —</option>';
-    }
-    if (hint) {
-      const focus = el.querySelector('input[name="focus"]:checked')?.value || "";
-      hint.classList.toggle("hidden", !(focus === "individual-student" && !!teacherId && roster.length === 0));
-    }
-  },
-
   renderWalkthrough() {
     const el = document.getElementById("page-walkthrough");
 
@@ -2076,17 +2037,6 @@ const APP = {
       });
       return;
     }
-    // Individual Student rosters (see Field 4 below) come from the live
-    // production roster (STUDENT_ROSTER / IEP_Students_2026_27), matched by
-    // teacher name — the same linkage Daily Pulse/PACE already use. It's
-    // loaded lazily here too (fire-and-forget: Whole Class/Small Group must
-    // never block on it), re-populating the Student field once it resolves.
-    if (!STUDENT_ROSTER.loaded && !STUDENT_ROSTER.loading) {
-      STUDENT_ROSTER.refresh().then(() => {
-        if (this.currentPage === "walkthrough") this._refreshWalkthroughStudentOptions();
-      });
-    }
-
     const user        = this.getCurrentUser();
     const allTeachers  = TEACHER_DIRECTORY.getAll();
     const teachers     = user.isAdmin ? allTeachers : allTeachers.filter(t => t.id === user.id);
@@ -2132,20 +2082,17 @@ const APP = {
                 <span>${escHtml(o.label)}</span>
               </label>`).join("")}
           </div>
-          <div id="walkFocusRosterHint" class="hidden" style="margin-top:10px;padding:8px 12px;background:#fef9c3;border:1px solid #fde68a;border-radius:8px;font-size:13px;color:#78350f">
-            No student roster has been added for this teacher. Select Whole Class or Small Group, or continue without naming a student.
-          </div>
         </div>
 
-        <!-- Field 3: Student (optional) — populated from the live roster
-             (STUDENT_ROSTER) once a teacher is selected; see the ss:change
-             handler and _refreshWalkthroughStudentOptions() below. Never
-             pre-populated with every student before a teacher is chosen. -->
+        <!-- Field 3: Student (optional) — free text. Students move between
+             classrooms often, so the administrator types the name directly
+             rather than picking from the selected teacher's roster. Never
+             validated against IEP_Students_2026_27 and never required, for
+             any Focus (including Individual Student). -->
         <div class="form-card walk-card section-student">
           <div class="walk-field-label">Student <span class="walk-optional-tag">optional</span></div>
-          <select class="form-select" name="studentId" id="walkthroughStudent">
-            <option value="">— None / whole class —</option>
-          </select>
+          <input type="text" class="form-input" name="studentName" id="walkthroughStudent"
+                 placeholder="Enter student name..." autocomplete="off" maxlength="255">
         </div>
 
         <!-- Field 4: Engagement Observed -->
@@ -2274,20 +2221,6 @@ const APP = {
       updateWalkthroughWeekLabel();
     });
 
-    // Populate the live student roster when a teacher is selected. See
-    // _refreshWalkthroughStudentOptions() for the roster/hint logic, shared
-    // with the "roster finished loading late" case above. (Classroom used to
-    // be auto-suggested here too — removed along with the Classroom field
-    // itself; New Walkthrough no longer collects a classroom at all.)
-    el.querySelector('[data-name="teacherId"]').addEventListener("ss:change", () => {
-      this._refreshWalkthroughStudentOptions();
-    });
-
-    // Update hint when focus changes
-    el.querySelectorAll('input[name="focus"]').forEach(r =>
-      r.addEventListener("change", () => this._refreshWalkthroughStudentOptions())
-    );
-
     // Form submit — named function prevents duplicate bindings across re-renders
     ensureWalkthroughSubmissionId();
     const _wForm = el.querySelector("#walkthroughForm");
@@ -2334,12 +2267,10 @@ const APP = {
     try {
       const user             = this.getCurrentUser();
       // Live SharePoint teacher directory (TEACHER_DIRECTORY) — not
-      // PILOT_TEACHERS. rawStudentId values now come from STUDENT_ROSTER's
-      // own SharePoint item ids (see _refreshWalkthroughStudentOptions()),
-      // not the legacy PILOT_STUDENTS slugs.
+      // PILOT_TEACHERS. Student is optional free text typed by the
+      // administrator (no roster lookup); saved trimmed, or blank.
       const directoryTeacher = TEACHER_DIRECTORY.find(teacherId);
-      const rawStudentId     = fd.get("studentId") || "";
-      const rosterStudent    = STUDENT_ROSTER.find(rawStudentId);
+      const studentName      = String(fd.get("studentName") || "").trim();
       const submissionId     = ensureWalkthroughSubmissionId();
 
       const responses = {
@@ -2353,8 +2284,8 @@ const APP = {
         // that still read responses.classroomId keep working unchanged.
         classroomId:        "",
         focus,
-        studentId:          rawStudentId,
-        studentName:        rosterStudent?.name || "",
+        studentId:          "",
+        studentName,
         engagementObserved: engagement,
         supportsObserved:   fd.getAll("supportsObserved"),
         observedWin:        (fd.get("observedWin") || "").trim(),
