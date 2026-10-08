@@ -315,6 +315,19 @@ const STUDENT_ROSTER = {
   find(id)    { return this._students.find(s => s.id === id) || null; },
   findByName(name) { return this._students.find(s => s.name === name) || null; },
 
+  // Read-only helper for the Students page's duplicate protection. The
+  // production roster has no student-id column, so the built display name
+  // (first + last) is the only identifier available — the same one Daily
+  // Pulse/PACE match on. This compares case- and extra-space-insensitively
+  // across ALL records (including inactive ones, so a deactivated student
+  // is flagged rather than silently re-created). Never mutates anything.
+  _nameKey(name) { return String(name || "").replace(/\s+/g, " ").trim().toLowerCase(); },
+  findDuplicates(firstName, lastName, excludeId) {
+    const key = this._nameKey(`${firstName} ${lastName}`);
+    if (!key) return [];
+    return this._students.filter(s => s.id !== excludeId && this._nameKey(s.name) === key);
+  },
+
   // Shared teacher-name match used by every teacher-scoped getter below —
   // case/whitespace-insensitive, but never guesses: a record with no
   // Teacher value never matches any teacher (it can still surface through
@@ -352,6 +365,28 @@ const STUDENT_ROSTER = {
     return this.getDailyPulseEnabled().filter(s => this._matchesTeacher(s, teacherName));
   }
 };
+
+// Students page → "+ Add Student" starting values. Only Active is ON.
+//
+//   Active              ON  — ordinary operational flag; a student being added
+//                             is normally active (same default Setup → Students
+//                             already uses).
+//   PACE Enabled        OFF — an ELIGIBILITY flag by this app's own definition
+//                             (it decides who appears in the PACE student list;
+//                             PACE is a specialized intervention service).
+//                             STUDENT_ROSTER deliberately treats a blank value
+//                             as "not eligible" (fail-safe), so a quick-add
+//                             form must not silently opt a student in.
+//   Daily Pulse Enabled OFF — same reasoning (config.js: "Daily Pulse
+//                             eligibility"); intentionally opt-in per student.
+//
+// The administrator sees all three checkboxes and can change them before
+// saving. To change a default later, edit this one object.
+const QUICK_ADD_STUDENT_DEFAULTS = Object.freeze({
+  active:            true,
+  paceEnabled:       false,
+  dailyPulseEnabled: false
+});
 
 /* ── Teacher Directory (live IEP_Users2 — active, Role includes Teacher) ──────── */
 //
@@ -1678,6 +1713,7 @@ const APP = {
       pulse:            `<svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>`,
       checkin:          `<svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M6 20v-1a6 6 0 0 1 12 0v1"/><path d="M16 11l2 2 4-4"/></svg>`,
       formlab:          `<svg class="nav-icon" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M9 2a1 1 0 000 2h2a1 1 0 100-2H9z"/><path fill-rule="evenodd" d="M4 5a2 2 0 012-2 3 3 0 003 3h2a3 3 0 003-3 2 2 0 012 2v11a2 2 0 01-2 2H6a2 2 0 01-2-2V5zm3 4a1 1 0 000 2h.01a1 1 0 100-2H7zm3 0a1 1 0 000 2h3a1 1 0 100-2h-3zm-3 4a1 1 0 100 2h.01a1 1 0 100-2H7zm3 0a1 1 0 100 2h3a1 1 0 100-2h-3z" clip-rule="evenodd"/></svg>`,
+      students:         `<svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>`,
       setup:            `<svg class="nav-icon" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clip-rule="evenodd"/></svg>`,
       storage:          `<svg class="nav-icon" viewBox="0 0 20 20" fill="currentColor"><path d="M4 4a2 2 0 00-2 2v1h16V6a2 2 0 00-2-2H4z"/><path fill-rule="evenodd" d="M18 9H2v5a2 2 0 002 2h12a2 2 0 002-2V9zM4 13a1 1 0 011-1h1a1 1 0 110 2H5a1 1 0 01-1-1zm5-1a1 1 0 100 2h1a1 1 0 100-2H9z" clip-rule="evenodd"/></svg>`,
       v2walkthrough:    `<svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>`
@@ -1695,6 +1731,7 @@ const APP = {
           { page: "reports",       label: "Reports",          cls: "nav-link" },
           { page: "pulse",         label: "Daily Pulse",      cls: "nav-link" },
           { page: "checkin",       label: "Student Check-In", cls: "nav-link" },
+          ...(AUTH.isAdmin && MAC_ADMIN_PANEL_ALLOWED ? [{ page: "students", label: "Students", cls: "nav-link" }] : []),
           { page: "formlab",       label: "Form Lab",         cls: "nav-link" },
           { page: "setup",         label: "Setup",            cls: "nav-link" },
           { page: "storage",       label: "Storage Settings", cls: "nav-link" },
@@ -1786,7 +1823,7 @@ const APP = {
   },
 
   navigate(page) {
-    const pages = ["walkthrough", "v2walkthrough", "pulse", "pace", "checkin", "dashboard", "reports", "formlab", "setup", "storage", "teacherDashboard"];
+    const pages = ["walkthrough", "v2walkthrough", "pulse", "pace", "checkin", "students", "dashboard", "reports", "formlab", "setup", "storage", "teacherDashboard"];
 
     if (!canAccessRoute(page)) {
       page = USER_CONTEXT.effectiveRole === "teacher" ? "pulse" : "dashboard";
@@ -1808,6 +1845,7 @@ const APP = {
       pulse:            "Daily Pulse",
       pace:             "PACE Log",
       checkin:          "Student Check-In",
+      students:         "Students",
       dashboard:        "Dashboard",
       reports:          "Reports",
       formlab:          "Form Lab",
@@ -1822,7 +1860,7 @@ const APP = {
     document.getElementById("sidebar").classList.remove("open");
     document.getElementById("sidebarOverlay").classList.add("hidden");
 
-    const noFabPages = ["walkthrough", "v2walkthrough", "pulse", "pace", "checkin", "teacherDashboard"];
+    const noFabPages = ["walkthrough", "v2walkthrough", "pulse", "pace", "checkin", "students", "teacherDashboard"];
     const fab = document.getElementById("fabBtn");
     if (fab) fab.classList.toggle("hidden", noFabPages.includes(page));
 
@@ -1832,6 +1870,7 @@ const APP = {
       pulse:            () => this.renderPulse(),
       pace:             () => this.renderPaceAdmin(),
       checkin:          () => this.renderStudentCheckIn(),
+      students:         () => this.renderStudents(),
       dashboard:        () => this.renderDashboard(),
       reports:          () => this.renderReports(),
       formlab:          () => this.renderFormLab(),
@@ -5163,6 +5202,374 @@ const APP = {
           badge.classList.remove("hidden");
         }
       }
+    }
+  },
+
+  /* ── STUDENTS (quick entry) ─────────────────────────────────────────────────── */
+  //
+  // A fast add/edit front door for the SAME production roster Setup → Students
+  // manages (STUDENT_ROSTER / CONFIG.STUDENT_ROSTER_LIST = IEP_Students_2026_27).
+  // No second student store: reads come from STUDENT_ROSTER, creates go through
+  // GRAPH.createMappedListItem(STUDENT_ROSTER._listName(), …) with the exact
+  // columns Setup → Students writes, and edits go through the same
+  // GRAPH.updateMappedListItem(…) PATCH path Setup uses for Activate/Deactivate.
+  // Teacher choices are the same canonical values Setup → Students offers
+  // (active Teacher-role IEP_Users2 users → resolveCanonicalTeacherValue()).
+  // Nothing here deletes a record, and nothing here touches New Walkthrough
+  // (whose Student field is free text and never reads the roster).
+
+  _studentsUi: { mode: null, editId: null, draft: null, dup: null, saving: false, search: "", justAddedKey: "" },
+
+  // Same three gates that protect Setup: Admin Panel permission
+  // (MAC_ADMIN_PANEL_ALLOWED, what canAccessRoute()/requireSetupAdmin() use),
+  // an Administrator role (renderSetup's AUTH.isAdmin check), and not
+  // currently previewing the app "as a teacher".
+  _studentsAdminAllowed() {
+    return !!AUTH.isAdmin && MAC_ADMIN_PANEL_ALLOWED === true && !USER_CONTEXT.isViewingAsTeacher;
+  },
+
+  _studentsDraftDefaults() {
+    return { first: "", last: "", teacher: "", classroom: "", ...QUICK_ADD_STUDENT_DEFAULTS };
+  },
+
+  renderStudents() {
+    const el = document.getElementById("page-students");
+    if (!el) return;
+    if (!this._studentsAdminAllowed()) {
+      el.innerHTML = `<div class="page-header"><h2>Students</h2></div>
+        <div class="warning-banner">You do not have permission to manage students.</div>`;
+      return;
+    }
+
+    if (!STUDENT_ROSTER.loaded && !STUDENT_ROSTER.error) {
+      el.innerHTML = this._rosterStatusHtml("Students");
+      this._ensureRosterLoading("students");
+      return;
+    }
+    if (STUDENT_ROSTER.error) {
+      el.innerHTML = `
+        <div class="page-header"><h2>Students</h2></div>
+        <div class="warning-banner">
+          <div><strong>Student roster could not be loaded.</strong><br>${escHtml(STUDENT_ROSTER.error)}</div>
+          <button type="button" class="btn btn-secondary btn-sm" id="stuRetry" style="margin-top:10px">Try Again</button>
+        </div>`;
+      document.getElementById("stuRetry")?.addEventListener("click", () => {
+        STUDENT_ROSTER.refresh().then(() => { if (this.currentPage === "students") this.renderStudents(); });
+      });
+      return;
+    }
+
+    // Teacher choices need the IEP_Users2 directory. Load it in the
+    // background (Whole page must not block on it) and redraw the form when
+    // it arrives.
+    if (!TEACHER_DIRECTORY.loaded && !TEACHER_DIRECTORY.loading) {
+      TEACHER_DIRECTORY.refresh().then(() => {
+        if (this.currentPage === "students") this._renderStudentsForm();
+      });
+    }
+
+    const ui = this._studentsUi;
+    el.innerHTML = `
+      <div class="page-header students-page-header">
+        <h2>Students</h2>
+        <button type="button" class="btn btn-primary" id="stuAddBtn">+ Add Student</button>
+      </div>
+      <div id="stuFormHost"></div>
+      <div class="students-toolbar">
+        <input type="search" class="form-input" id="stuSearch" placeholder="Search students…" aria-label="Search students" value="${escHtml(ui.search)}">
+        <span class="text-muted" id="stuCount" style="font-size:12px"></span>
+      </div>
+      <div id="stuList"></div>`;
+
+    document.getElementById("stuAddBtn")?.addEventListener("click", () => this._openStudentAdd());
+    document.getElementById("stuSearch")?.addEventListener("input", e => {
+      this._studentsUi.search = e.target.value || "";
+      this._renderStudentsList();
+    });
+    this._renderStudentsForm();
+    this._renderStudentsList();
+  },
+
+  _openStudentAdd() {
+    if (!this._studentsAdminAllowed()) return;
+    const ui = this._studentsUi;
+    if (ui.mode !== "add") {
+      ui.mode = "add"; ui.editId = null; ui.dup = null;
+      ui.draft = this._studentsDraftDefaults();
+    }
+    this._renderStudentsForm();
+    document.getElementById("stuFirst")?.focus?.();
+  },
+
+  _openStudentEdit(id) {
+    if (!this._studentsAdminAllowed()) return;
+    const s = STUDENT_ROSTER.find(id);
+    if (!s) return;
+    const ui = this._studentsUi;
+    ui.mode = "edit"; ui.editId = id; ui.dup = null;
+    ui.draft = {
+      first: s.firstName || "", last: s.lastName || "", teacher: s.teacherName || "", classroom: s.classroom || "",
+      active: s.active, paceEnabled: s.paceEnabled, dailyPulseEnabled: s.dailyPulseEnabled
+    };
+    this._renderStudentsForm();
+    document.getElementById("stuFirst")?.focus?.();
+  },
+
+  _closeStudentForm() {
+    const ui = this._studentsUi;
+    ui.mode = null; ui.editId = null; ui.draft = null; ui.dup = null; ui.saving = false;
+    this._renderStudentsForm();
+  },
+
+  // Same canonical Teacher values Setup → Students offers. When editing a
+  // student whose current Teacher isn't in the list (e.g. a former teacher),
+  // it's kept as an extra "(current)" choice so an edit never silently
+  // reassigns them.
+  _studentTeacherOptions(currentValue) {
+    const roster = STUDENT_ROSTER.getAll();
+    const options = TEACHER_DIRECTORY.getAll()
+      .map(t => ({ label: t.name, value: resolveCanonicalTeacherValue(t.name, roster) }))
+      .sort((a, b) => a.label.localeCompare(b.label));
+    if (currentValue && !options.some(o => o.value === currentValue)) {
+      options.push({ label: `${currentValue} (current)`, value: currentValue });
+    }
+    return options;
+  },
+
+  // Pulls the live form values into the draft so a re-render (duplicate
+  // warning, directory finishing its load) never loses what was typed.
+  _readStudentsForm() {
+    const ui = this._studentsUi;
+    const g = id => document.getElementById(id);
+    if (!g("stuFirst")) return ui.draft;
+    const clean = v => String(v || "").replace(/\s+/g, " ").trim();
+    ui.draft = {
+      first:             clean(g("stuFirst").value),
+      last:              clean(g("stuLast")?.value),
+      teacher:           g("stuTeacher")?.value || "",
+      classroom:         clean(g("stuClassroom")?.value),
+      active:            !!g("stuActive")?.checked,
+      paceEnabled:       !!g("stuPace")?.checked,
+      dailyPulseEnabled: !!g("stuPulse")?.checked
+    };
+    return ui.draft;
+  },
+
+  _renderStudentsForm() {
+    const host = document.getElementById("stuFormHost");
+    if (!host) return;
+    const ui = this._studentsUi;
+    if (!ui.mode) { host.innerHTML = ""; return; }
+    const editing = ui.mode === "edit";
+    const d = ui.draft || this._studentsDraftDefaults();
+    const teacherOptions = this._studentTeacherOptions(d.teacher);
+    const directoryNote = TEACHER_DIRECTORY.error
+      ? `<div class="form-help" style="color:#b91c1c">Teacher list could not be loaded: ${escHtml(TEACHER_DIRECTORY.error)}</div>`
+      : !TEACHER_DIRECTORY.loaded ? `<div class="form-help">Loading teachers…</div>` : "";
+    const dis = ui.saving ? " disabled" : "";
+
+    const dupHtml = ui.dup ? `
+      <div class="warning-banner student-dup-warning" role="alert">
+        <div>
+          <strong>This student may already be on the roster.</strong>
+          <ul class="student-dup-list">
+            ${ui.dup.matches.map(m => `<li>${escHtml(m.name)} — ${escHtml(m.teacherName || "no teacher")} · ${m.active ? "Active" : "Inactive"}</li>`).join("")}
+          </ul>
+          ${ui.dup.matches.some(m => !m.active) ? `<div class="form-help">An inactive record exists — consider editing it and turning Active back on instead of creating a second one.</div>` : ""}
+          <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
+            <button type="button" class="btn btn-secondary btn-sm" id="stuDupConfirm"${dis}>${editing ? "Save anyway" : "Add as a separate student"}</button>
+            <button type="button" class="btn btn-secondary btn-sm" id="stuDupDismiss"${dis}>Go back</button>
+          </div>
+        </div>
+      </div>` : "";
+
+    host.innerHTML = `
+      <form class="form-card students-quick-form" id="stuFormEl" novalidate>
+        <h3>${editing ? "Edit Student" : "Add Student"}</h3>
+        ${dupHtml}
+        <div class="form-field">
+          <div class="form-label">Student Name <span class="req">*</span></div>
+          <div class="student-name-pair">
+            <input class="form-input" id="stuFirst" placeholder="First name" maxlength="60" autocomplete="off" value="${escHtml(d.first)}"${dis}>
+            <input class="form-input" id="stuLast" placeholder="Last name" maxlength="60" autocomplete="off" value="${escHtml(d.last)}"${dis}>
+          </div>
+        </div>
+        <div class="form-grid">
+          <div class="form-field">
+            <label class="form-label" for="stuTeacher">Teacher <span class="req">*</span></label>
+            <select class="form-select" id="stuTeacher"${dis}>
+              <option value="">— Select teacher —</option>
+              ${teacherOptions.map(t => `<option value="${escHtml(t.value)}"${t.value === d.teacher ? " selected" : ""}>${escHtml(t.label)}</option>`).join("")}
+            </select>
+            ${directoryNote}
+          </div>
+          <div class="form-field">
+            <label class="form-label" for="stuClassroom">Classroom (optional)</label>
+            <input class="form-input" id="stuClassroom" placeholder="e.g. Room 12" maxlength="80" value="${escHtml(d.classroom)}"${dis}>
+          </div>
+        </div>
+        <label class="detail-checkbox-row" for="stuActive">
+          <input type="checkbox" id="stuActive"${d.active ? " checked" : ""}${dis}>
+          <span>Active</span>
+        </label>
+        <label class="detail-checkbox-row" for="stuPace">
+          <input type="checkbox" id="stuPace"${d.paceEnabled ? " checked" : ""}${dis}>
+          <span>PACE Enabled</span>
+        </label>
+        <label class="detail-checkbox-row" for="stuPulse">
+          <input type="checkbox" id="stuPulse"${d.dailyPulseEnabled ? " checked" : ""}${dis}>
+          <span>Daily Pulse Enabled</span>
+        </label>
+        ${editing ? "" : `<p class="form-help">PACE and Daily Pulse start off — turn them on only for students who take part.</p>`}
+        <div class="students-form-actions">
+          ${editing
+            ? `<button type="submit" class="btn btn-primary" id="stuSave"${dis}>${ui.saving ? "Saving…" : "Save Changes"}</button>`
+            : `<button type="submit" class="btn btn-primary" id="stuSave"${dis}>${ui.saving ? "Saving…" : "Save Student"}</button>
+               <button type="button" class="btn btn-secondary" id="stuSaveAnother"${dis}>Save &amp; Add Another</button>`}
+          <button type="button" class="btn btn-secondary" id="stuCancel"${dis}>Cancel</button>
+        </div>
+      </form>`;
+
+    document.getElementById("stuFormEl")?.addEventListener("submit", e => { e.preventDefault(); this._saveStudentForm(false); });
+    document.getElementById("stuSaveAnother")?.addEventListener("click", () => this._saveStudentForm(true));
+    document.getElementById("stuCancel")?.addEventListener("click", () => this._closeStudentForm());
+    document.getElementById("stuDupConfirm")?.addEventListener("click", () => this._saveStudentForm(!!ui.dup?.andAnother, true));
+    document.getElementById("stuDupDismiss")?.addEventListener("click", () => {
+      this._readStudentsForm();
+      ui.dup = null;
+      this._renderStudentsForm();
+    });
+  },
+
+  _renderStudentsList() {
+    const list = document.getElementById("stuList");
+    if (!list) return;
+    const ui = this._studentsUi;
+    const all = [...STUDENT_ROSTER.getAll()].sort((a, b) =>
+      (a.lastName || a.name).localeCompare(b.lastName || b.name) || (a.firstName || "").localeCompare(b.firstName || ""));
+    const q = ui.search.trim().toLowerCase();
+    const rows = q ? all.filter(s => `${s.name} ${s.teacherName} ${s.classroom}`.toLowerCase().includes(q)) : all;
+    const count = document.getElementById("stuCount");
+    if (count) count.textContent = q ? `${rows.length} of ${all.length}` : `${all.length} student${all.length !== 1 ? "s" : ""}`;
+
+    if (!all.length) {
+      list.innerHTML = `<div class="card"><div class="empty-state"><div class="empty-icon">🪪</div><p>No students on the roster yet. Use + Add Student to create the first one.</p></div></div>`;
+      return;
+    }
+    if (!rows.length) {
+      list.innerHTML = `<div class="card"><div class="empty-state"><p>No students match “${escHtml(ui.search.trim())}”.</p></div></div>`;
+      return;
+    }
+    list.innerHTML = `
+      <div class="card">
+        <div class="table-wrap"><table class="students-table"><thead><tr>
+          <th>Student</th><th>Teacher / Class</th><th>Status</th><th></th>
+        </tr></thead><tbody>
+          ${rows.map(s => `<tr class="${s.active ? "" : "row-inactive"}${ui.justAddedKey && STUDENT_ROSTER._nameKey(s.name) === ui.justAddedKey ? " student-row-new" : ""}" data-student-id="${escHtml(s.id)}">
+            <td><strong>${escHtml(s.name)}</strong></td>
+            <td class="text-muted">${escHtml(s.teacherName) || "—"}${s.classroom ? ` · ${escHtml(s.classroom)}` : ""}</td>
+            <td>${s.active ? '<span class="badge badge-green">Active</span>' : '<span class="badge badge-slate">Inactive</span>'}
+              ${s.paceEnabled ? '<span class="badge badge-blue">PACE</span>' : ""}
+              ${s.dailyPulseEnabled ? '<span class="badge badge-blue">Pulse</span>' : ""}</td>
+            <td><button type="button" class="btn btn-secondary btn-sm stu-edit-btn" data-student-id="${escHtml(s.id)}">Edit</button></td>
+          </tr>`).join("")}
+        </tbody></table></div>
+      </div>`;
+    list.querySelectorAll(".stu-edit-btn").forEach(btn =>
+      btn.addEventListener("click", () => this._openStudentEdit(btn.dataset.studentId)));
+    list.querySelector(".student-row-new")?.scrollIntoView?.({ block: "nearest" });
+  },
+
+  // Create or update. Nothing is reported as saved until SharePoint has
+  // actually confirmed the write: the toast, the form reset, and the roster
+  // refresh all happen strictly AFTER the awaited Graph call succeeds; a
+  // failed write leaves the form open with everything the admin typed.
+  async _saveStudentForm(andAnother, allowDuplicate = false) {
+    const ui = this._studentsUi;
+    if (ui.saving || !ui.mode) return;
+    const d = this._readStudentsForm() || this._studentsDraftDefaults();
+    const editing = ui.mode === "edit";
+
+    try {
+      requireSetupAdmin();
+      if (!this._studentsAdminAllowed()) throw new Error("Admin Panel access required.");
+    } catch (err) { showToast("Failed to save student: " + err.message, "error"); return; }
+
+    if (!d.first || !d.last) { showToast("Enter the student's first and last name.", "error"); return; }
+    if (!d.teacher)          { showToast("Select a teacher.", "error"); return; }
+
+    if (!allowDuplicate) {
+      const matches = STUDENT_ROSTER.findDuplicates(d.first, d.last, editing ? ui.editId : null);
+      if (matches.length) {
+        ui.dup = { matches: matches.map(m => ({ name: m.name, teacherName: m.teacherName, active: m.active })), andAnother };
+        this._renderStudentsForm();
+        return;
+      }
+    }
+
+    const existing = editing ? STUDENT_ROSTER.find(ui.editId) : null;
+    const yn = v => (v ? "Yes" : "No");
+    let fields;
+    if (editing) {
+      if (!existing) { showToast("That student is no longer on the roster.", "error"); this._closeStudentForm(); return; }
+      fields = {};
+      if (d.first !== (existing.firstName || ""))      fields["Student First Name"]  = d.first;
+      if (d.last  !== (existing.lastName  || ""))      fields["Student Last Name"]   = d.last;
+      if (d.teacher !== (existing.teacherName || ""))  fields["Teacher"]             = d.teacher;
+      if (d.classroom !== (existing.classroom || ""))  fields["Classroom"]           = d.classroom;
+      if (d.active !== existing.active)                fields["Active"]              = yn(d.active);
+      if (d.paceEnabled !== existing.paceEnabled)      fields["PACE Enabled"]        = yn(d.paceEnabled);
+      if (d.dailyPulseEnabled !== existing.dailyPulseEnabled) fields["Daily Pulse Enabled"] = yn(d.dailyPulseEnabled);
+      if (!Object.keys(fields).length) { showToast("No changes to save."); this._closeStudentForm(); return; }
+    } else {
+      // Exactly the columns Setup → Students writes — no new fields.
+      fields = {
+        "Student First Name":  d.first,
+        "Student Last Name":   d.last,
+        "Teacher":             d.teacher,
+        "Classroom":           d.classroom,
+        "Active":              yn(d.active),
+        "PACE Enabled":        yn(d.paceEnabled),
+        "Daily Pulse Enabled": yn(d.dailyPulseEnabled)
+      };
+    }
+
+    ui.saving = true;
+    ui.dup = null;
+    this._renderStudentsForm();
+    try {
+      if (editing) await GRAPH.updateMappedListItem(STUDENT_ROSTER._listName(), ui.editId, fields);
+      else         await GRAPH.createMappedListItem(STUDENT_ROSTER._listName(), fields);
+    } catch (err) {
+      ui.saving = false;
+      showToast(`Failed to ${editing ? "update" : "add"} student: ` + (err.message || String(err)), "error");
+      this._renderStudentsForm();
+      return;
+    }
+
+    // ── SharePoint confirmed the write ──
+    const fullName = `${d.first} ${d.last}`;
+    showToast(editing ? `"${fullName}" updated.` : `Student "${fullName}" added.`);
+    await STUDENT_ROSTER.refresh();
+    SETUP_DATA.students = STUDENT_ROSTER.getAll(); // keep Setup → Students' snapshot current
+    if (STUDENT_ROSTER.error) {
+      showToast("Saved, but the roster could not be refreshed — reload the page to confirm.", "error");
+    } else if (!editing && !STUDENT_ROSTER.getAll().some(s => STUDENT_ROSTER._nameKey(s.name) === STUDENT_ROSTER._nameKey(fullName))) {
+      showToast("Saved to SharePoint, but the new student isn't showing on the roster yet — refresh and verify.", "error");
+    }
+
+    ui.saving = false;
+    ui.justAddedKey = editing ? "" : STUDENT_ROSTER._nameKey(fullName);
+    if (!editing && andAnother) {
+      ui.mode = "add"; ui.editId = null; ui.dup = null;
+      ui.draft = this._studentsDraftDefaults();
+    } else {
+      ui.mode = null; ui.editId = null; ui.draft = null; ui.dup = null;
+    }
+    if (this.currentPage === "students") {
+      this._renderStudentsForm();
+      this._renderStudentsList();
+      if (ui.mode === "add") document.getElementById("stuFirst")?.focus?.();
     }
   },
 

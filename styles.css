@@ -4183,3 +4183,41 @@ tbody tr:hover td { background: var(--color-primary-light); }
   padding: 12px 14px;
   margin: 8px 0 0;
 }
+
+/* ── Students page (quick add / edit) ─────────────────────────────────────── */
+
+.students-page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.students-page-header h2 { margin-bottom: 0; }
+
+.students-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 14px 0 12px;
+}
+.students-toolbar .form-input { max-width: 340px; }
+
+.students-quick-form { margin-bottom: 16px; }
+.student-name-pair {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+@media (max-width: 480px) { .student-name-pair { grid-template-columns: 1fr; } }
+
+.students-form-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+
+.student-dup-warning { margin-bottom: 14px; }
+.student-dup-list { margin: 6px 0 4px 18px; padding: 0; font-size: 13px; }
+.student-row-new { background: #f0fdf4; }
