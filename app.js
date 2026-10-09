@@ -247,8 +247,11 @@ const STUDENT_ROSTER = {
   // columns and no "Student ID" column — see the schema comment in
   // config.js. The legacyName fallback only matters for the old pilot list.
   _normalize(row) {
-    const firstName = String(row["Student First Name"] || "").trim();
-    const lastName  = String(row["Student Last Name"]  || "").trim();
+    // The loose fallbacks only matter if the list's column isn't reported
+    // under the documented display name (they are never consulted when
+    // "Student First Name"/"Student Last Name" has a value).
+    const firstName = String(row["Student First Name"] || row["First Name"] || row["StudentFirstName"] || row["FirstName"] || "").trim();
+    const lastName  = String(row["Student Last Name"]  || row["Last Name"]  || row["StudentLastName"]  || row["LastName"]  || "").trim();
     const legacyName = String(row["Student Name"] || row["StudentName"] || row["Name"] || "").trim();
     const name = (firstName || lastName) ? `${firstName} ${lastName}`.trim() : legacyName;
     if (!name) return null;
@@ -314,6 +317,35 @@ const STUDENT_ROSTER = {
   getActive() { return this._students.filter(s => s.active); },
   find(id)    { return this._students.find(s => s.id === id) || null; },
   findByName(name) { return this._students.find(s => s.name === name) || null; },
+
+  // Which of the list's real columns hold the first and last name. Used by
+  // the Students page so a save is addressed to a column that actually
+  // exists in THIS list (compared loosely: case, spaces, punctuation and
+  // SharePoint's _x0020_ escapes are ignored) instead of assuming one exact
+  // spelling and silently losing the value when it isn't there. Throws a
+  // descriptive error — listing the columns it did find — rather than ever
+  // guessing a destination.
+  _colKey(label) {
+    return String(label || "")
+      .replace(/_x([0-9a-f]{4})_/gi, (_, h) => String.fromCharCode(parseInt(h, 16)))
+      .toLowerCase().replace(/[^a-z0-9]/g, "");
+  },
+  async resolveWriteColumns() {
+    const schema = await GRAPH.getListSchema(this._listName());
+    const find = candidates => {
+      const exact = candidates.find(c => c in schema);
+      if (exact) return exact;
+      const wanted = candidates.map(c => this._colKey(c));
+      return Object.keys(schema).find(k => wanted.includes(this._colKey(k))) || null;
+    };
+    const firstName = find(["Student First Name", "First Name"]);
+    const lastName  = find(["Student Last Name", "Last Name"]);
+    const missing = [!firstName && "first name", !lastName && "last name"].filter(Boolean);
+    if (missing.length) {
+      throw new Error(`The roster list ${this._listName()} has no column for the student's ${missing.join(" or ")}. Columns found: ${Object.keys(schema).join(", ") || "none"}.`);
+    }
+    return { firstName, lastName, schema };
+  },
 
   // Read-only helper for the Students page's duplicate protection. The
   // production roster has no student-id column, so the built display name
@@ -5218,7 +5250,7 @@ const APP = {
   // Nothing here deletes a record, and nothing here touches New Walkthrough
   // (whose Student field is free text and never reads the roster).
 
-  _studentsUi: { mode: null, editId: null, draft: null, dup: null, saving: false, search: "", justAddedKey: "" },
+  _studentsUi: { mode: null, editId: null, draft: null, dup: null, problem: null, saving: false, search: "", justAddedKey: "" },
 
   // Same three gates that protect Setup: Admin Panel permission
   // (MAC_ADMIN_PANEL_ALLOWED, what canAccessRoute()/requireSetupAdmin() use),
@@ -5294,7 +5326,7 @@ const APP = {
     if (!this._studentsAdminAllowed()) return;
     const ui = this._studentsUi;
     if (ui.mode !== "add") {
-      ui.mode = "add"; ui.editId = null; ui.dup = null;
+      ui.mode = "add"; ui.editId = null; ui.dup = null; ui.problem = null;
       ui.draft = this._studentsDraftDefaults();
     }
     this._renderStudentsForm();
@@ -5306,7 +5338,7 @@ const APP = {
     const s = STUDENT_ROSTER.find(id);
     if (!s) return;
     const ui = this._studentsUi;
-    ui.mode = "edit"; ui.editId = id; ui.dup = null;
+    ui.mode = "edit"; ui.editId = id; ui.dup = null; ui.problem = null;
     ui.draft = {
       first: s.firstName || "", last: s.lastName || "", teacher: s.teacherName || "", classroom: s.classroom || "",
       active: s.active, paceEnabled: s.paceEnabled, dailyPulseEnabled: s.dailyPulseEnabled
@@ -5317,7 +5349,7 @@ const APP = {
 
   _closeStudentForm() {
     const ui = this._studentsUi;
-    ui.mode = null; ui.editId = null; ui.draft = null; ui.dup = null; ui.saving = false;
+    ui.mode = null; ui.editId = null; ui.draft = null; ui.dup = null; ui.problem = null; ui.saving = false;
     this._renderStudentsForm();
   },
 
@@ -5383,9 +5415,19 @@ const APP = {
         </div>
       </div>` : "";
 
+    const problemHtml = ui.problem ? `
+      <div class="warning-banner student-save-problem" role="alert">
+        <div>
+          <strong>SharePoint did not keep: ${escHtml(ui.problem.problems.join(", "))}.</strong>
+          <div class="form-help">${ui.problem.created ? "The record was created in SharePoint, but" : "SharePoint accepted the update, but"} the values did not come back when the roster was re-read, so this was <strong>not</strong> counted as saved.${ui.problem.created ? " Saving again updates that same record — it will not create a second one." : ""}</div>
+          <ul class="student-dup-list">${ui.problem.columns.map(c => `<li>${escHtml(c)}</li>`).join("")}</ul>
+        </div>
+      </div>` : "";
+
     host.innerHTML = `
       <form class="form-card students-quick-form" id="stuFormEl" novalidate>
         <h3>${editing ? "Edit Student" : "Add Student"}</h3>
+        ${problemHtml}
         ${dupHtml}
         <div class="form-field">
           <div class="form-label">Student Name <span class="req">*</span></div>
@@ -5508,38 +5550,50 @@ const APP = {
     }
 
     const existing = editing ? STUDENT_ROSTER.find(ui.editId) : null;
-    const yn = v => (v ? "Yes" : "No");
-    let fields;
+    if (editing && !existing) { showToast("That student is no longer on the roster.", "error"); this._closeStudentForm(); return; }
+
+    // `logical` records which student attributes this save sends, so the
+    // post-save check below verifies exactly those (and nothing else).
+    const logical = {};
     if (editing) {
-      if (!existing) { showToast("That student is no longer on the roster.", "error"); this._closeStudentForm(); return; }
-      fields = {};
-      if (d.first !== (existing.firstName || ""))      fields["Student First Name"]  = d.first;
-      if (d.last  !== (existing.lastName  || ""))      fields["Student Last Name"]   = d.last;
-      if (d.teacher !== (existing.teacherName || ""))  fields["Teacher"]             = d.teacher;
-      if (d.classroom !== (existing.classroom || ""))  fields["Classroom"]           = d.classroom;
-      if (d.active !== existing.active)                fields["Active"]              = yn(d.active);
-      if (d.paceEnabled !== existing.paceEnabled)      fields["PACE Enabled"]        = yn(d.paceEnabled);
-      if (d.dailyPulseEnabled !== existing.dailyPulseEnabled) fields["Daily Pulse Enabled"] = yn(d.dailyPulseEnabled);
-      if (!Object.keys(fields).length) { showToast("No changes to save."); this._closeStudentForm(); return; }
+      if (d.first !== (existing.firstName || ""))      logical.first = d.first;
+      if (d.last  !== (existing.lastName  || ""))      logical.last = d.last;
+      if (d.teacher !== (existing.teacherName || ""))  logical.teacher = d.teacher;
+      if (d.classroom !== (existing.classroom || ""))  logical.classroom = d.classroom;
+      if (d.active !== existing.active)                logical.active = d.active;
+      if (d.paceEnabled !== existing.paceEnabled)      logical.paceEnabled = d.paceEnabled;
+      if (d.dailyPulseEnabled !== existing.dailyPulseEnabled) logical.dailyPulseEnabled = d.dailyPulseEnabled;
+      if (!Object.keys(logical).length) { showToast("No changes to save."); this._closeStudentForm(); return; }
     } else {
-      // Exactly the columns Setup → Students writes — no new fields.
-      fields = {
-        "Student First Name":  d.first,
-        "Student Last Name":   d.last,
-        "Teacher":             d.teacher,
-        "Classroom":           d.classroom,
-        "Active":              yn(d.active),
-        "PACE Enabled":        yn(d.paceEnabled),
-        "Daily Pulse Enabled": yn(d.dailyPulseEnabled)
-      };
+      Object.assign(logical, {
+        first: d.first, last: d.last, teacher: d.teacher,
+        active: d.active, paceEnabled: d.paceEnabled, dailyPulseEnabled: d.dailyPulseEnabled
+      });
+      if (d.classroom) logical.classroom = d.classroom; // a blank classroom is simply not sent
     }
 
     ui.saving = true;
     ui.dup = null;
+    ui.problem = null;
     this._renderStudentsForm();
+
+    const yn = v => (v ? "Yes" : "No");
+    let result;
     try {
-      if (editing) await GRAPH.updateMappedListItem(STUDENT_ROSTER._listName(), ui.editId, fields);
-      else         await GRAPH.createMappedListItem(STUDENT_ROSTER._listName(), fields);
+      // Address the name fields to the list's REAL first/last-name columns.
+      const cols = await STUDENT_ROSTER.resolveWriteColumns();
+      const fields = {};
+      if ("first" in logical)             fields[cols.firstName] = logical.first;
+      if ("last" in logical)              fields[cols.lastName]  = logical.last;
+      if ("teacher" in logical)           fields["Teacher"]             = logical.teacher;
+      if ("classroom" in logical)         fields["Classroom"]           = logical.classroom;
+      if ("active" in logical)            fields["Active"]              = yn(logical.active);
+      if ("paceEnabled" in logical)       fields["PACE Enabled"]        = yn(logical.paceEnabled);
+      if ("dailyPulseEnabled" in logical) fields["Daily Pulse Enabled"] = yn(logical.dailyPulseEnabled);
+      // strict: a field with no writable column aborts the save before
+      // anything is written — it is never skipped quietly.
+      if (editing) result = await GRAPH.updateMappedListItem(STUDENT_ROSTER._listName(), ui.editId, fields, { strict: true });
+      else         result = await GRAPH.createMappedListItem(STUDENT_ROSTER._listName(), fields, { strict: true });
     } catch (err) {
       ui.saving = false;
       showToast(`Failed to ${editing ? "update" : "add"} student: ` + (err.message || String(err)), "error");
@@ -5547,18 +5601,36 @@ const APP = {
       return;
     }
 
-    // ── SharePoint confirmed the write ──
+    // ── SharePoint accepted the write ──
     const fullName = `${d.first} ${d.last}`;
-    showToast(editing ? `"${fullName}" updated.` : `Student "${fullName}" added.`);
+    const savedId = editing ? ui.editId : String(result?.id ?? "");
     await STUDENT_ROSTER.refresh();
     SETUP_DATA.students = STUDENT_ROSTER.getAll(); // keep Setup → Students' snapshot current
+
     if (STUDENT_ROSTER.error) {
-      showToast("Saved, but the roster could not be refreshed — reload the page to confirm.", "error");
-    } else if (!editing && !STUDENT_ROSTER.getAll().some(s => STUDENT_ROSTER._nameKey(s.name) === STUDENT_ROSTER._nameKey(fullName))) {
-      showToast("Saved to SharePoint, but the new student isn't showing on the roster yet — refresh and verify.", "error");
+      showToast(`${editing ? "Update" : "Student"} sent, but the roster could not be re-read to confirm it — reload the page and check.`, "error");
+    } else {
+      // Re-read check: the roster as the rest of the app sees it must now
+      // show what was just saved. This is what catches a column that
+      // accepted the request but doesn't hold (or doesn't read back) the value.
+      const problems = this._studentSaveProblems(savedId, logical);
+      if (problems.length) {
+        ui.saving = false;
+        ui.draft = d;
+        if (!editing && savedId) { ui.mode = "edit"; ui.editId = savedId; } // a retry updates this record — never creates a second one
+        ui.problem = { problems, created: !editing, columns: await this._describeRosterColumns() };
+        showToast(`SharePoint did not keep: ${problems.join(", ")}. Nothing was reported as saved — see the details on the form.`, "error");
+        if (this.currentPage === "students") { this._renderStudentsForm(); this._renderStudentsList(); }
+        return;
+      }
+      if (!editing && !savedId && !STUDENT_ROSTER.getAll().some(s => STUDENT_ROSTER._nameKey(s.name) === STUDENT_ROSTER._nameKey(fullName))) {
+        showToast("Saved to SharePoint, but the new student isn't showing on the roster yet — refresh and verify.", "error");
+      }
     }
 
+    showToast(editing ? `"${fullName}" updated.` : `Student "${fullName}" added.`);
     ui.saving = false;
+    ui.problem = null;
     ui.justAddedKey = editing ? "" : STUDENT_ROSTER._nameKey(fullName);
     if (!editing && andAnother) {
       ui.mode = "add"; ui.editId = null; ui.dup = null;
@@ -5570,6 +5642,33 @@ const APP = {
       this._renderStudentsForm();
       this._renderStudentsList();
       if (ui.mode === "add") document.getElementById("stuFirst")?.focus?.();
+    }
+  },
+
+  // Compares the just-saved record, as the roster now reads it back from
+  // SharePoint, with what was sent. Returns human-readable labels of anything
+  // that did not come back — [] means the save is confirmed.
+  _studentSaveProblems(id, logical) {
+    const rec = id ? STUDENT_ROSTER.find(id) : null;
+    if (!rec) return id ? ["the saved student could not be found when the roster was re-read"] : [];
+    const checks = [
+      ["first",             "first name",          rec.firstName],
+      ["last",              "last name",           rec.lastName],
+      ["teacher",           "teacher",             rec.teacherName],
+      ["classroom",         "classroom",           rec.classroom],
+      ["active",            "Active",              rec.active],
+      ["paceEnabled",       "PACE Enabled",        rec.paceEnabled],
+      ["dailyPulseEnabled", "Daily Pulse Enabled", rec.dailyPulseEnabled]
+    ];
+    return checks.filter(([key, , readBack]) => key in logical && logical[key] !== readBack).map(([, label]) => label);
+  },
+
+  async _describeRosterColumns() {
+    try {
+      const { firstName, lastName, schema } = await STUDENT_ROSTER.resolveWriteColumns();
+      return [`First name: "${firstName}" → column ${schema[firstName]}`, `Last name: "${lastName}" → column ${schema[lastName]}`];
+    } catch (err) {
+      return [err.message || String(err)];
     }
   },
 

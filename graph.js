@@ -212,10 +212,10 @@ const GRAPH = {
     return response.json();
   },
 
-  async updateMappedListItem(listName, itemId, displayFields) {
+  async updateMappedListItem(listName, itemId, displayFields, options) {
     const siteId = await this.getSiteId();
     const listId = await this.getListId(listName);
-    const fields = await this.mapFields(listName, displayFields);
+    const fields = await this.mapFields(listName, displayFields, options);
     return this._patch(`sites/${siteId}/lists/${listId}/items/${itemId}/fields`, fields);
   },
 
@@ -410,7 +410,7 @@ const GRAPH = {
     const siteId = await this.getSiteId();
     const listId = await this.getListId(listName);
     const data   = await this._get(
-      `sites/${siteId}/lists/${listId}/columns?$select=name,displayName,text,choice,dateTime,boolean,number`
+      `sites/${siteId}/lists/${listId}/columns?$select=name,displayName,hidden,readOnly,text,choice,dateTime,boolean,number`
     );
     console.table(data.value.map(col => ({
       displayName: col.displayName,
@@ -425,36 +425,62 @@ const GRAPH = {
     if (this._schemaCache[listName]) return this._schemaCache[listName];
     const columns = await this.getListColumns(listName);
     const schema  = {};
+    const chosenIsUsable = {};
     columns.forEach(col => {
-      if (col.displayName && col.name) schema[col.displayName] = col.name;
+      if (!col.displayName || !col.name) return;
+      // SharePoint reports several columns under ONE display name when the
+      // built-in Title column has been renamed: the real, writable "Title"
+      // plus the computed, read-only "LinkTitle" / "LinkTitleNoMenu". The old
+      // plain last-wins assignment let one of those computed columns shadow
+      // the real one, so writes to that field were silently skipped as
+      // read-only (and reads were inverted through the wrong column). A
+      // usable (writable, visible) column always wins; a non-usable one only
+      // fills the slot while nothing usable has claimed it. Among usable
+      // columns the previous last-wins behaviour is unchanged.
+      const usable = isWritableSharePointField(col.name) && !col.hidden && !col.readOnly;
+      if (schema[col.displayName] === undefined || usable || !chosenIsUsable[col.displayName]) {
+        schema[col.displayName] = col.name;
+        chosenIsUsable[col.displayName] = usable;
+      }
     });
     this._schemaCache[listName] = schema;
     console.log(`Schema for ${listName}:`, schema);
     return schema;
   },
 
-  async mapFields(listName, displayFields) {
+  // By default a field with no writable column is skipped with a console
+  // warning (long-standing behaviour other lists rely on for optional
+  // columns). With { strict: true } any such field throws BEFORE anything is
+  // written, so a caller that must not lose data (the Students page) can
+  // never get a half-saved record reported as a success.
+  async mapFields(listName, displayFields, options = {}) {
     const schema = await this.getListSchema(listName);
     const mapped = {};
+    const dropped = [];
     Object.entries(displayFields).forEach(([displayName, value]) => {
       if (value === undefined || value === null) return;
       const internalName = schema[displayName];
       if (!internalName) {
         // Field NAME only — never log `value`, it may be student/staff data.
         console.warn(`UNMAPPED FIELD — display: "${displayName}", internalName: (none)`);
+        dropped.push(`"${displayName}" has no matching column`);
         return;
       }
       if (!isWritableSharePointField(internalName)) {
         console.warn(`SKIPPED (read-only) — display: "${displayName}", internalName: "${internalName}"`);
+        dropped.push(`"${displayName}" maps to the read-only column "${internalName}"`);
         return;
       }
       mapped[internalName] = value;
     });
+    if (options.strict && dropped.length) {
+      throw new Error(`Column mapping problem in ${listName} — nothing was saved. ${dropped.join("; ")}.`);
+    }
     return mapped;
   },
 
-  async createMappedListItem(listName, displayFields) {
-    const fields = await this.mapFields(listName, displayFields);
+  async createMappedListItem(listName, displayFields, options) {
+    const fields = await this.mapFields(listName, displayFields, options);
     return this.createListItem(listName, fields);
   },
 
