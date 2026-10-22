@@ -78,6 +78,8 @@ function makeGraphMock() {
   return {
     calls,
     GRAPH: {
+      // The roster is read with the all-pages reader; the mock serves the same rows.
+      async getAllListItems(listName) { return this.getListItems(listName); },
       async getListItems(listName) {
         calls.getListItems.push(listName);
         if (listName === "IEP_Students_2026_27") return ROSTER_ROWS;
@@ -89,8 +91,22 @@ function makeGraphMock() {
         return {};
       },
       async getWhoAreYouVisiting() { calls.getWhoAreYouVisiting++; return [{ spId: "t1", name: "Stock" }]; },
-      async createMappedListItem(listName, fields) { calls.createMappedListItem.push({ listName, fields }); return { id: "new-item" }; },
-      async updateMappedListItem(listName, itemId, fields) { calls.updateMappedListItem.push({ listName, itemId, fields }); return {}; }
+      // The shared student save path validates, writes, then re-reads the record by id, so the mock
+      // keeps a small stateful roster (display names → internal columns, like the real list).
+      async mapFields(listName, fields) { return fields; },
+      async missingRequiredColumns() { return []; },
+      async booleanValueFor(listName, display, flag) { return flag ? "Yes" : "No"; },
+      async getListItem(listName, id) { return { ...ROSTER_ROWS.find(r => r.id === id) }; },
+      async createMappedListItem(listName, fields) {
+        calls.createMappedListItem.push({ listName, fields });
+        ROSTER_ROWS.push({ id: "new-item", ...Object.fromEntries(Object.entries(fields).map(([k, v]) => [ROSTER_SCHEMA[k], v])) });
+        return { id: "new-item" };
+      },
+      async updateMappedListItem(listName, itemId, fields) {
+        calls.updateMappedListItem.push({ listName, itemId, fields });
+        Object.assign(ROSTER_ROWS.find(r => r.id === itemId), Object.fromEntries(Object.entries(fields).map(([k, v]) => [ROSTER_SCHEMA[k], v])));
+        return {};
+      }
     }
   };
 }

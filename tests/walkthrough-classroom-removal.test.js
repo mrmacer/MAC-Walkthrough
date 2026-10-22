@@ -73,6 +73,8 @@ function makeContext() {
     setTimeout, clearTimeout, structuredClone, addEventListener() {}, removeEventListener() {}, confirm: () => true,
     TextEncoder, Uint8Array,
     GRAPH: {
+      // The roster is read with the all-pages reader; the mock serves the same rows.
+      async getAllListItems(listName) { return this.getListItems(listName); },
       async getListItems(listName) {
         if (listName === "IEP_Students_2026_27") return ROSTER_ROWS;
         return [];

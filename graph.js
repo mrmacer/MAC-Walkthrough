@@ -7,6 +7,10 @@ function normalizeFollowUp(value) {
   return value || "No";
 }
 
+// Computed, read-only columns SharePoint derives from the Title column. When
+// Title is renamed, these carry the new display name (see resolveWriteTarget).
+const COMPUTED_TITLE_COLUMNS = new Set(["LinkTitle", "LinkTitleNoMenu"]);
+
 function isWritableSharePointField(internalName) {
   const blocked = new Set([
     "id",
@@ -41,6 +45,7 @@ const GRAPH = {
   _siteId:      null,
   _listIdCache:  {},
   _schemaCache:  {},
+  _columnCache:  {},
   _lists:        { users: "IEP_Users2" },
 
   async _get(path) {
@@ -51,7 +56,7 @@ const GRAPH = {
     if (!resp.ok) {
       const body = await resp.text().catch(() => "");
       console.error("Graph GET failed", path, resp.status, body);
-      throw new Error(`Graph ${resp.status}: ${body}`);
+      throw Object.assign(new Error(`Graph ${resp.status}: ${body}`), { graphStatus: resp.status });
     }
     return resp.json();
   },
@@ -100,21 +105,75 @@ const GRAPH = {
     return items;
   },
 
+  // One item by its exact SharePoint id — used to verify a just-saved record
+  // independently of list paging or name matching.
+  async getListItem(listName, itemId) {
+    const siteId = await this.getSiteId();
+    const listId = await this.getListId(listName);
+    const data   = await this._get(`sites/${siteId}/lists/${listId}/items/${encodeURIComponent(itemId)}?$expand=fields`);
+    return { id: data.id, ...(data.fields || {}) };
+  },
+
+  // Writable columns SharePoint marks Required (and gives no default) that a
+  // create payload does not supply. `mappedFields` is keyed by INTERNAL name,
+  // i.e. the output of mapFields(). Returns display names only. Never invents
+  // a value — the caller must refuse to create instead.
+  async missingRequiredColumns(listName, mappedFields) {
+    await this.getListSchema(listName);
+    return (this._columnCache[listName] || [])
+      .filter(c => c.required && !c.hidden && !c.readOnly && !c.calculated &&
+                   isWritableSharePointField(c.name) && c.defaultValue == null && !(c.name in (mappedFields || {})))
+      .map(c => c.displayName || c.name);
+  },
+
   // PACE visits accumulate beyond Microsoft Graph's default page size. Keep
   // the existing one-page reader stable for current callers, and use this
   // explicit all-pages reader for administrative history/analytics.
-  async getAllListItems(listName) {
+  // Reads EVERY item of a list, following @odata.nextLink until there is no
+  // further page. It is all-or-nothing: if any page fails, comes back
+  // malformed, a continuation link is invalid or repeats, or the page limit
+  // is hit, it THROWS (error.incompleteLoad = true) instead of returning the
+  // pages gathered so far — a partial list must never be mistaken for the
+  // whole list. Items repeated across overlapping pages are kept once (by
+  // SharePoint item id). The roster, PACE history and other "needs all rows"
+  // readers use this; the single-page getListItems() below does not.
+  async getAllListItems(listName, options = {}) {
     const siteId = await this.getSiteId();
     const listId = await this.getListId(listName);
-    let path = `sites/${siteId}/lists/${listId}/items?$expand=fields&$top=200`;
-    let items = [];
+    const maxPages = options.maxPages || 500;
+    const incomplete = why => Object.assign(
+      new Error(`Incomplete load of ${listName}: ${why}. The partial result was discarded.`), { incompleteLoad: true });
+
+    const first = `sites/${siteId}/lists/${listId}/items?$expand=fields&$top=200`;
+    const requested = new Set([first]);
+    const byId = new Map();
+    let path = first;
+    let pages = 0;
     while (path) {
-      const data = await this._get(path);
-      items = items.concat(data.value || []);
-      const nextLink = data["@odata.nextLink"];
-      path = nextLink ? nextLink.replace(`${this._BASE}/`, "") : null;
+      if (++pages > maxPages) throw incomplete(`stopped after ${maxPages} pages without reaching the end`);
+      let data;
+      try {
+        data = await this._get(path);
+      } catch (err) {
+        throw Object.assign(new Error(`Incomplete load of ${listName}: page ${pages} failed (${err.message}). The partial result was discarded.`),
+          { incompleteLoad: true, graphStatus: err.graphStatus });
+      }
+      if (!data || !Array.isArray(data.value)) throw incomplete(`page ${pages} was malformed`);
+      for (const item of data.value) {
+        if (!item || item.id === undefined || item.id === null || item.id === "") throw incomplete(`page ${pages} contained an item with no id`);
+        if (!byId.has(String(item.id))) byId.set(String(item.id), item);
+      }
+      const next = data["@odata.nextLink"];
+      if (next === undefined || next === null || next === "") { path = null; continue; }
+      // The continuation must be a Graph URL for THIS list's items — anything else is not trusted.
+      if (typeof next !== "string" || !next.startsWith(`${this._BASE}/`) || !next.includes("/items") || !next.includes(listId)) {
+        throw incomplete(`page ${pages} returned an invalid continuation link`);
+      }
+      path = next.slice(this._BASE.length + 1);
+      if (requested.has(path)) throw incomplete(`page ${pages} returned a continuation link that was already requested`);
+      requested.add(path);
     }
-    return items.map(item => ({ id: item.id, ...item.fields }));
+    return [...byId.values()].map(item => ({ id: item.id, ...item.fields }));
   },
 
   // Normalize internal SharePoint field keys back to display names. PACE's
@@ -191,7 +250,10 @@ const GRAPH = {
     if (!resp.ok) {
       const text = await resp.text().catch(() => "");
       console.error("Graph POST failed", path, resp.status, text);
-      throw new Error(`Graph POST ${resp.status}: ${text}`);
+      // graphStatus marks "SharePoint answered and refused" — as opposed to a
+      // network failure (no graphStatus), where the write may or may not have
+      // happened. Student saves use this to decide whether a retry is safe.
+      throw Object.assign(new Error(`Graph POST ${resp.status}: ${text}`), { graphStatus: resp.status });
     }
     return resp.json();
   },
@@ -206,7 +268,7 @@ const GRAPH = {
     if (!response.ok) {
       const text = await response.text().catch(() => "");
       console.error("Graph PATCH failed", { path, status: response.status, response: text, body });
-      throw new Error(`Graph PATCH ${response.status}: ${text}`);
+      throw Object.assign(new Error(`Graph PATCH ${response.status}: ${text}`), { graphStatus: response.status });
     }
     if (response.status === 204) return null;
     return response.json();
@@ -410,7 +472,7 @@ const GRAPH = {
     const siteId = await this.getSiteId();
     const listId = await this.getListId(listName);
     const data   = await this._get(
-      `sites/${siteId}/lists/${listId}/columns?$select=name,displayName,hidden,readOnly,text,choice,dateTime,boolean,number`
+      `sites/${siteId}/lists/${listId}/columns?$select=name,displayName,hidden,readOnly,required,defaultValue,text,choice,dateTime,boolean,number,lookup,personOrGroup,calculated`
     );
     console.table(data.value.map(col => ({
       displayName: col.displayName,
@@ -444,35 +506,146 @@ const GRAPH = {
       }
     });
     this._schemaCache[listName] = schema;
+    this._columnCache[listName] = columns; // authoritative metadata, for resolveWriteTarget()
     console.log(`Schema for ${listName}:`, schema);
     return schema;
+  },
+
+  // True only for the one list this app manages students in
+  // (CONFIG.STUDENT_ROSTER_LIST, i.e. IEP_Students_2026_27). Read at call
+  // time; if CONFIG isn't loaded, nothing qualifies.
+  _isStudentRosterList(listName) {
+    const roster = typeof CONFIG !== "undefined" ? String(CONFIG.STUDENT_ROSTER_LIST || "").trim() : "";
+    return !!roster && String(listName || "").trim().toLowerCase() === roster.toLowerCase();
+  },
+
+  // What kind of value a column actually holds, from SharePoint's own column
+  // metadata (never inferred from its name or from existing data).
+  _columnKind(col) {
+    if (!col) return "unknown";
+    if (col.calculated) return "calculated";
+    if (col.boolean)  return "boolean";
+    if (col.choice)   return "choice";
+    if (col.text)     return "text";
+    if (col.number)   return "number";
+    if (col.dateTime) return "dateTime";
+    if (col.lookup)   return "lookup";
+    if (col.personOrGroup) return "personOrGroup";
+    return "other";
+  },
+
+  // The exact value to send for a Yes/No flag, chosen from the target
+  // column's real type: a Boolean column takes true/false; a Choice column
+  // takes whichever of its own choices reads Yes/No (or True/False); a Text
+  // column takes "Yes"/"No" (the representation this app has always used).
+  // Any other type — or a choice list with no clear yes/no — throws instead
+  // of guessing, before anything is written.
+  async booleanValueFor(listName, displayName, flag) {
+    const target = await this.resolveWriteTarget(listName, displayName);
+    if (!target.internalName) throw new Error(target.reason);
+    const col = (this._columnCache[listName] || []).find(c => c.name === target.internalName);
+    const kind = this._columnKind(col);
+    if (kind === "boolean") return !!flag;
+    if (kind === "text")    return flag ? "Yes" : "No";
+    if (kind === "choice") {
+      const choices = col.choice.choices || [];
+      const want = flag ? ["yes", "true"] : ["no", "false"];
+      const hit = choices.find(c => want.includes(String(c).trim().toLowerCase()));
+      if (hit === undefined) throw new Error(`"${displayName}" is a Choice column (${choices.join(", ") || "no choices"}) with no clear ${flag ? "Yes" : "No"} option.`);
+      return hit;
+    }
+    throw new Error(`"${displayName}" is a ${kind} column; this app cannot safely store a Yes/No value in it.`);
+  },
+
+  // Strict-mode check that a value is something the target column accepts.
+  _valueProblem(col, displayName, value) {
+    const kind = this._columnKind(col);
+    const bad = why => `"${displayName}" ${why}`;
+    if (kind === "text") {
+      if (typeof value !== "string") return bad("is a text column but the value is not text");
+      const max = col.text.maxLength;
+      if (max && value.length > max) return bad(`is longer than the column allows (${max} characters)`);
+      return null;
+    }
+    if (kind === "boolean") return typeof value === "boolean" ? null : bad("is a Yes/No (boolean) column and needs true/false, not text");
+    if (kind === "choice") {
+      const choices = col.choice.choices || [];
+      if (typeof value === "string" && (col.choice.allowTextEntry || choices.includes(value))) return null;
+      return bad(`is a Choice column and "${typeof value === "string" ? value : typeof value}" is not one of its choices (${choices.join(", ")})`);
+    }
+    return bad(`is a ${kind} column, which this app cannot safely write`);
+  },
+
+  // Which real, writable internal column a display name must be written to.
+  //
+  // Normally that is just the schema entry. The one exception is a renamed
+  // Title column: SharePoint then exposes its value under the new display name
+  // ONLY through the computed, read-only "LinkTitle"/"LinkTitleNoMenu"
+  // columns, while the writable column underneath keeps the internal name
+  // "Title". (Reads already work through the computed column; writes to it are
+  // rejected.) That relationship is defined by SharePoint, not guessed — and
+  // it is still verified against the list's own column metadata: the
+  // translation is made only when no usable column carries the display name
+  // AND the metadata contains a real, writable, visible column named exactly
+  // "Title". Anything else is returned as-is so the caller rejects it.
+  async resolveWriteTarget(listName, displayName) {
+    const schema  = await this.getListSchema(listName);
+    const columns = this._columnCache[listName] || [];
+    const internal = schema[displayName];
+    if (!internal) return { internalName: null, reason: `"${displayName}" has no matching column` };
+    if (isWritableSharePointField(internal)) return { internalName: internal, translated: false };
+
+    if (COMPUTED_TITLE_COLUMNS.has(internal)) {
+      // Deliberately limited to the configured student roster list. Every
+      // other list keeps the original behaviour (a computed column is
+      // reported as read-only and the field is skipped/rejected).
+      if (!this._isStudentRosterList(listName)) {
+        return { internalName: null, reason: `"${displayName}" maps to the read-only column "${internal}"` };
+      }
+      const title = columns.find(c => c.name === "Title");
+      if (title && !title.hidden && !title.readOnly) {
+        return { internalName: "Title", translated: true, via: internal };
+      }
+      return { internalName: null, reason: `"${displayName}" maps to the read-only column "${internal}" and the list has no writable "Title" column to write it to` };
+    }
+    return { internalName: null, reason: `"${displayName}" maps to the read-only column "${internal}"` };
   },
 
   // By default a field with no writable column is skipped with a console
   // warning (long-standing behaviour other lists rely on for optional
   // columns). With { strict: true } any such field throws BEFORE anything is
   // written, so a caller that must not lose data (the Students page) can
-  // never get a half-saved record reported as a success.
+  // never get a half-saved record reported as a success. Two fields that
+  // would land in the same column (e.g. a renamed-Title field plus a field
+  // that is literally "Title") are always rejected rather than overwritten.
   async mapFields(listName, displayFields, options = {}) {
-    const schema = await this.getListSchema(listName);
     const mapped = {};
+    const source = {};
     const dropped = [];
-    Object.entries(displayFields).forEach(([displayName, value]) => {
-      if (value === undefined || value === null) return;
-      const internalName = schema[displayName];
-      if (!internalName) {
+    for (const [displayName, value] of Object.entries(displayFields)) {
+      if (value === undefined || value === null) continue;
+      const target = await this.resolveWriteTarget(listName, displayName);
+      if (!target.internalName) {
         // Field NAME only — never log `value`, it may be student/staff data.
-        console.warn(`UNMAPPED FIELD — display: "${displayName}", internalName: (none)`);
-        dropped.push(`"${displayName}" has no matching column`);
-        return;
+        console.warn(`SKIPPED — display: "${displayName}": ${target.reason}`);
+        dropped.push(target.reason);
+        continue;
       }
-      if (!isWritableSharePointField(internalName)) {
-        console.warn(`SKIPPED (read-only) — display: "${displayName}", internalName: "${internalName}"`);
-        dropped.push(`"${displayName}" maps to the read-only column "${internalName}"`);
-        return;
+      if (target.translated) {
+        console.warn(`Column "${displayName}" is the computed "${target.via}"; writing to its underlying "Title" column.`);
       }
-      mapped[internalName] = value;
-    });
+      if (source[target.internalName] !== undefined && source[target.internalName] !== displayName) {
+        dropped.push(`"${displayName}" and "${source[target.internalName]}" would both write to the column "${target.internalName}"`);
+        continue;
+      }
+      if (options.strict) {
+        const col = (this._columnCache[listName] || []).find(c => c.name === target.internalName);
+        const problem = this._valueProblem(col, displayName, value);
+        if (problem) { dropped.push(problem); continue; }
+      }
+      mapped[target.internalName] = value;
+      source[target.internalName] = displayName;
+    }
     if (options.strict && dropped.length) {
       throw new Error(`Column mapping problem in ${listName} — nothing was saved. ${dropped.join("; ")}.`);
     }

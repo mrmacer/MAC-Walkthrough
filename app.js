@@ -225,8 +225,10 @@ function normalizeRosterBoolean(value, defaultValue) {
 const STUDENT_ROSTER = {
   _students:      [],
   loading:        false,
-  loaded:         false,
-  error:          null,
+  loaded:         false,   // a COMPLETE roster has been loaded at least once
+  error:          null,    // the most recent refresh failed (message)
+  incomplete:     false,   // ...and it failed because not every page could be read
+  loadedAt:       null,
   _usingFallback: false,
 
   _listName() {
@@ -278,9 +280,37 @@ const STUDENT_ROSTER = {
     };
   },
 
+  // One raw SharePoint item → a normalized student, using the list's real
+  // column metadata. Shared by the roster load AND by save verification, so a
+  // just-saved record is read back exactly the way the rest of the app (PACE,
+  // Daily Pulse, the Students pages) will read it.
+  _itemToStudent(item, schema) {
+    const inv = {};
+    Object.entries(schema).forEach(([display, internal]) => { inv[internal] = display; });
+    const row = {};
+    Object.entries(item).forEach(([k, v]) => { row[inv[k] || k] = v; });
+    // A renamed Title column surfaces under its new display name through
+    // the computed LinkTitle / LinkTitleNoMenu fields. If Graph didn't
+    // include those on the item, the same value is in Title itself —
+    // use it only to fill a display name that came back empty (never to
+    // replace a value, never invented).
+    Object.entries(schema).forEach(([display, internal]) => {
+      if ((internal === "LinkTitle" || internal === "LinkTitleNoMenu") && !String(row[display] || "").trim() && item.Title) {
+        row[display] = item.Title;
+      }
+    });
+    row.id = item.id; // stable SharePoint list item id — not subject to display-name guessing
+    return this._normalize(row);
+  },
+
+  // Loads the WHOLE roster (every Graph page) or fails. A partial result is
+  // never kept: on any failure the previously loaded complete roster, if
+  // there is one, stays exactly as it was, and `error` is set so callers can
+  // show a retry instead of presenting stale/partial data as current.
   async refresh() {
     this.loading = true;
     this.error   = null;
+    this.incomplete = false;
     const listName = this._listName();
     if (this._usingFallback) {
       // Generic, non-identifying notice only — never log roster contents.
@@ -288,29 +318,44 @@ const STUDENT_ROSTER = {
     }
     try {
       const [raw, schema] = await Promise.all([
-        GRAPH.getListItems(listName),
+        GRAPH.getAllListItems(listName),
         GRAPH.getListSchema(listName)
       ]);
-      const inv = {};
-      Object.entries(schema).forEach(([display, internal]) => { inv[internal] = display; });
       this._students = raw
-        .map(item => {
-          const row = {};
-          Object.entries(item).forEach(([k, v]) => { row[inv[k] || k] = v; });
-          row.id = item.id; // stable SharePoint list item id — not subject to display-name guessing
-          return this._normalize(row);
-        })
+        .map(item => this._itemToStudent(item, schema))
         .filter(Boolean);
       this.loaded = true;
+      this.loadedAt = Date.now();
       // Generic diagnostic only — a count, never the records themselves.
       console.log(`Student roster loaded: ${this._students.length} record(s).`);
     } catch (err) {
       console.error("Student roster load failed:", err.message || String(err));
       this.error = err.message || "Unable to load the student roster.";
+      this.incomplete = !!(err && err.incompleteLoad);
     } finally {
       this.loading = false;
     }
     return this._students;
+  },
+
+  // "idle" (never requested) | "loading" | "complete" (every page read, no
+  // failure since) | "incomplete" (a page could not be read) | "failed" (the
+  // refresh failed for another reason). Only "complete" may be used to decide
+  // that a student does or doesn't exist, or to create one.
+  status() {
+    if (this.loading) return "loading";
+    if (this.error)   return this.incomplete ? "incomplete" : "failed";
+    return this.loaded ? "complete" : "idle";
+  },
+  isComplete() { return this.status() === "complete"; },
+  // Shown whenever a roster is not usable; says whether an earlier complete copy is still being held.
+  problemText() {
+    const st = this.status();
+    if (st === "complete" || st === "loading" || st === "idle") return "";
+    const head = st === "incomplete"
+      ? "The student roster is INCOMPLETE — not every page could be read from SharePoint."
+      : "The student roster could not be refreshed.";
+    return `${head} ${this.error}`;
   },
 
   getAll()    { return this._students; },
@@ -347,6 +392,145 @@ const STUDENT_ROSTER = {
     return { firstName, lastName, schema };
   },
 
+  // ── The ONE verified write path for roster students ─────────────────────
+  //
+  // Both the Students page and Setup → Students (add, edit, activate /
+  // deactivate) save through create()/update() below, so they share exactly
+  // one set of rules:
+  //   • name fields go to the list's real first/last-name columns, and a
+  //     renamed-Title first name goes to the writable Title column (never a
+  //     computed one) — GRAPH.mapFields / resolveWriteTarget;
+  //   • Yes/No flags are sent in the column's own SharePoint type —
+  //     GRAPH.booleanValueFor;
+  //   • strict mapping + type checks run BEFORE anything is sent, and a
+  //     create is refused if the list has a required writable column this
+  //     form doesn't supply (no value is ever invented for one);
+  //   • afterwards the record is fetched again BY ITS EXACT ITEM ID and
+  //     compared field by field with what was submitted.
+  // Results are reported as one of:
+  //   "verified"   – read back by id and every submitted value matches
+  //   "mismatch"   – the record exists but SharePoint kept different values
+  //   "unverified" – the write was accepted but could not be confirmed
+  //                  (no id in the response, or the read-back failed)
+  //   "uncertain"  – the connection failed mid-write; whether it happened is
+  //                  unknown. A create in this state is NEVER retried.
+  //   "failed"     – nothing was written (refused before sending, or
+  //                  SharePoint answered with an error), so a retry is safe.
+  _validId(v) {
+    if (typeof v === "number" && Number.isFinite(v)) return String(v);
+    if (typeof v === "string" && v.trim()) return v.trim();
+    return "";
+  },
+
+  // Labels of every submitted value that did not read back identically.
+  compareSaved(logical, rec) {
+    const r = rec || {};
+    const checks = [
+      ["first",             "first name",          r.firstName ?? ""],
+      ["last",              "last name",           r.lastName ?? ""],
+      ["teacher",           "teacher",             r.teacherName ?? ""],
+      ["classroom",         "classroom",           r.classroom ?? ""],
+      ["active",            "Active",              r.active],
+      ["paceEnabled",       "PACE Enabled",        r.paceEnabled],
+      ["dailyPulseEnabled", "Daily Pulse Enabled", r.dailyPulseEnabled]
+    ];
+    return checks.filter(([key, , readBack]) => key in logical && logical[key] !== readBack).map(([, label]) => label);
+  },
+
+  create(values)        { return this._commit("create", "", values); },
+  update(id, changes)   { return this._commit("update", this._validId(id), changes); },
+
+  async _commit(mode, id, logical) {
+    const list = this._listName();
+    const done = (status, extra = {}) => ({ status, mode, id: extra.id ?? id, ...extra });
+
+    // 1. Prepare — read-only. Any problem here means nothing was sent.
+    let fields;
+    try {
+      requireSetupAdmin();
+      if (mode === "update" && !id) throw new Error("A student record id is required to save changes.");
+      if (mode === "create" && !this.isComplete()) {
+        throw new Error("Nothing was saved: the student roster is not fully loaded, so a duplicate can't be ruled out. Refresh the roster and try again.");
+      }
+      const cols = await this.resolveWriteColumns();
+      const flag = (display, v) => GRAPH.booleanValueFor(list, display, v);
+      fields = {};
+      if ("first" in logical)             fields[cols.firstName] = logical.first;
+      if ("last" in logical)              fields[cols.lastName]  = logical.last;
+      if ("teacher" in logical)           fields["Teacher"]             = logical.teacher;
+      if ("classroom" in logical)         fields["Classroom"]           = logical.classroom;
+      if ("active" in logical)            fields["Active"]              = await flag("Active", logical.active);
+      if ("paceEnabled" in logical)       fields["PACE Enabled"]        = await flag("PACE Enabled", logical.paceEnabled);
+      if ("dailyPulseEnabled" in logical) fields["Daily Pulse Enabled"] = await flag("Daily Pulse Enabled", logical.dailyPulseEnabled);
+      const mapped = await GRAPH.mapFields(list, fields, { strict: true });   // dry run: validates, writes nothing
+      if (mode === "create") {
+        const missing = await GRAPH.missingRequiredColumns(list, mapped);
+        if (missing.length) {
+          throw new Error(`The roster list requires ${missing.map(m => `"${m}"`).join(", ")}, which this form does not collect. Nothing was saved — a value will not be made up. Ask an administrator to make the column optional or give it a default.`);
+        }
+      }
+    } catch (err) {
+      return done("failed", { phase: "prepare", error: err.message || String(err) });
+    }
+
+    // 2. Write.
+    let result = null, unknownOutcome = null;
+    try {
+      result = mode === "create"
+        ? await GRAPH.createMappedListItem(list, fields, { strict: true })
+        : await GRAPH.updateMappedListItem(list, id, fields, { strict: true });
+    } catch (err) {
+      // SharePoint answered with an error → it did not do the write.
+      if (err && err.graphStatus) return done("failed", { phase: "write", error: err.message || String(err) });
+      unknownOutcome = err;   // no answer (network) → the write may have happened
+    }
+
+    const savedId = mode === "create" ? this._validId(result?.id) : id;
+    if (!savedId) {
+      await this.refresh().catch(() => {});
+      return unknownOutcome
+        ? done("uncertain", { error: unknownOutcome.message || String(unknownOutcome) })
+        : done("unverified", { reason: "no-id" });
+    }
+
+    // 3. Verify by the exact item id.
+    let rec = null, readError = null;
+    try {
+      const schema = await GRAPH.getListSchema(list);
+      const item = await GRAPH.getListItem(list, savedId);
+      if (this._validId(item?.id) !== savedId) throw new Error("SharePoint returned a different item than the one saved.");
+      rec = this._itemToStudent(item, schema) || {};   // {} = a record with no readable name → every name check fails
+    } catch (err) { readError = err; }
+    await this.refresh().catch(() => {});   // keep the roster the rest of the app uses current
+
+    if (readError) {
+      return done(unknownOutcome ? "uncertain" : "unverified", { id: savedId, reason: "read-back-failed", error: readError.message || String(readError) });
+    }
+    const problems = this.compareSaved(logical, rec);
+    if (problems.length) return done(unknownOutcome ? "uncertain" : "mismatch", { id: savedId, problems });
+    return done("verified", { id: savedId, record: rec });
+  },
+
+  // One plain-language message per outcome, shared by both UIs.
+  describeResult(res, fullName) {
+    const verb = res.mode === "create" ? "add" : "update";
+    const label = `"${fullName}"`;
+    switch (res.status) {
+      case "verified":
+        return { ok: true, message: res.mode === "create" ? `Student ${label} added.` : `${label} updated.` };
+      case "failed":
+        return { ok: false, message: `Failed to ${verb} student: ${res.error}` };
+      case "mismatch":
+        return { ok: false, message: `SharePoint did not keep: ${res.problems.join(", ")}. Nothing was reported as saved.` };
+      case "unverified":
+        return { ok: false, message: res.reason === "no-id"
+          ? `NOT VERIFIED: SharePoint accepted the request for ${label} but returned no item ID, so it could not be checked. It may have been created — check the roster before adding it again.`
+          : `NOT VERIFIED: ${label} was sent to SharePoint but could not be read back to confirm it. Check the roster before saving again.` };
+      default:
+        return { ok: false, message: `UNCERTAIN: the connection failed while saving ${label}, so it is unknown whether it was saved. It was NOT retried. Refresh the roster and check before adding it again.` };
+    }
+  },
+
   // Read-only helper for the Students page's duplicate protection. The
   // production roster has no student-id column, so the built display name
   // (first + last) is the only identifier available — the same one Daily
@@ -355,6 +539,11 @@ const STUDENT_ROSTER = {
   // is flagged rather than silently re-created). Never mutates anything.
   _nameKey(name) { return String(name || "").replace(/\s+/g, " ").trim().toLowerCase(); },
   findDuplicates(firstName, lastName, excludeId) {
+    // An incomplete / failed / stale roster can't prove a name is unique, so
+    // it doesn't get to answer at all.
+    if (!this.isComplete()) {
+      throw Object.assign(new Error("The student roster is not fully loaded, so duplicate names can't be checked. Refresh the roster and try again."), { rosterNotComplete: true });
+    }
     const key = this._nameKey(`${firstName} ${lastName}`);
     if (!key) return [];
     return this._students.filter(s => s.id !== excludeId && this._nameKey(s.name) === key);
@@ -2912,14 +3101,24 @@ const APP = {
         <div class="walk-page-header"><h2 class="walk-page-title">${escHtml(title)}</h2></div>
         <div class="warning-banner">
           <div>
-            <strong>Student roster could not be loaded.</strong><br>
-            Please refresh or contact your administrator.
+            <strong>${STUDENT_ROSTER.incomplete ? "The student roster is incomplete." : "Student roster could not be loaded."}</strong><br>
+            No students are shown until the whole roster has loaded.<br>
+            <span class="form-help">${escHtml(STUDENT_ROSTER.error)}</span>
           </div>
+          <button type="button" class="btn btn-secondary btn-sm" style="margin-top:10px" onclick="APP._retryRosterLoad()">Try Again</button>
         </div>`;
     }
     return `
       <div class="walk-page-header"><h2 class="walk-page-title">${escHtml(title)}</h2></div>
       <div class="card"><p class="empty-state-text">Loading student roster…</p></div>`;
+  },
+
+  // Manual retry from any roster error page: reload the whole roster, then redraw the current page.
+  async _retryRosterLoad() {
+    if (STUDENT_ROSTER.loading) return;
+    await STUDENT_ROSTER.refresh();
+    SETUP_DATA.students = STUDENT_ROSTER.getAll();
+    this.navigate(this.currentPage);
   },
 
   _initPulseDraft(studentName) {
@@ -5250,7 +5449,7 @@ const APP = {
   // Nothing here deletes a record, and nothing here touches New Walkthrough
   // (whose Student field is free text and never reads the roster).
 
-  _studentsUi: { mode: null, editId: null, draft: null, dup: null, problem: null, saving: false, search: "", justAddedKey: "" },
+  _studentsUi: { mode: null, editId: null, draft: null, dup: null, problem: null, unsure: null, saving: false, search: "", justAddedKey: "" },
 
   // Same three gates that protect Setup: Admin Panel permission
   // (MAC_ADMIN_PANEL_ALLOWED, what canAccessRoute()/requireSetupAdmin() use),
@@ -5282,7 +5481,8 @@ const APP = {
       el.innerHTML = `
         <div class="page-header"><h2>Students</h2></div>
         <div class="warning-banner">
-          <div><strong>Student roster could not be loaded.</strong><br>${escHtml(STUDENT_ROSTER.error)}</div>
+          <div><strong>${STUDENT_ROSTER.incomplete ? "The student roster is incomplete." : "Student roster could not be loaded."}</strong><br>${escHtml(STUDENT_ROSTER.error)}
+            <br><span class="form-help">No students are shown, and nothing can be added, until the whole roster has loaded.</span></div>
           <button type="button" class="btn btn-secondary btn-sm" id="stuRetry" style="margin-top:10px">Try Again</button>
         </div>`;
       document.getElementById("stuRetry")?.addEventListener("click", () => {
@@ -5326,7 +5526,7 @@ const APP = {
     if (!this._studentsAdminAllowed()) return;
     const ui = this._studentsUi;
     if (ui.mode !== "add") {
-      ui.mode = "add"; ui.editId = null; ui.dup = null; ui.problem = null;
+      ui.mode = "add"; ui.editId = null; ui.dup = null; ui.problem = null; ui.unsure = null;
       ui.draft = this._studentsDraftDefaults();
     }
     this._renderStudentsForm();
@@ -5338,7 +5538,7 @@ const APP = {
     const s = STUDENT_ROSTER.find(id);
     if (!s) return;
     const ui = this._studentsUi;
-    ui.mode = "edit"; ui.editId = id; ui.dup = null; ui.problem = null;
+    ui.mode = "edit"; ui.editId = id; ui.dup = null; ui.problem = null; ui.unsure = null;
     ui.draft = {
       first: s.firstName || "", last: s.lastName || "", teacher: s.teacherName || "", classroom: s.classroom || "",
       active: s.active, paceEnabled: s.paceEnabled, dailyPulseEnabled: s.dailyPulseEnabled
@@ -5349,7 +5549,7 @@ const APP = {
 
   _closeStudentForm() {
     const ui = this._studentsUi;
-    ui.mode = null; ui.editId = null; ui.draft = null; ui.dup = null; ui.problem = null; ui.saving = false;
+    ui.mode = null; ui.editId = null; ui.draft = null; ui.dup = null; ui.problem = null; ui.unsure = null; ui.saving = false;
     this._renderStudentsForm();
   },
 
@@ -5398,7 +5598,11 @@ const APP = {
     const directoryNote = TEACHER_DIRECTORY.error
       ? `<div class="form-help" style="color:#b91c1c">Teacher list could not be loaded: ${escHtml(TEACHER_DIRECTORY.error)}</div>`
       : !TEACHER_DIRECTORY.loaded ? `<div class="form-help">Loading teachers…</div>` : "";
+    // After an id-less / uncertain create, saving stays paused until the admin has re-read the roster.
+    const paused = !!(ui.unsure && ui.unsure.noId && !ui.unsure.checked);
+    const rosterBlocked = !STUDENT_ROSTER.isComplete() && !STUDENT_ROSTER.loading;
     const dis = ui.saving ? " disabled" : "";
+    const saveDis = ui.saving || paused || rosterBlocked ? " disabled" : "";
 
     const dupHtml = ui.dup ? `
       <div class="warning-banner student-dup-warning" role="alert">
@@ -5418,15 +5622,17 @@ const APP = {
     const problemHtml = ui.problem ? `
       <div class="warning-banner student-save-problem" role="alert">
         <div>
-          <strong>SharePoint did not keep: ${escHtml(ui.problem.problems.join(", "))}.</strong>
-          <div class="form-help">${ui.problem.created ? "The record was created in SharePoint, but" : "SharePoint accepted the update, but"} the values did not come back when the roster was re-read, so this was <strong>not</strong> counted as saved.${ui.problem.created ? " Saving again updates that same record — it will not create a second one." : ""}</div>
-          <ul class="student-dup-list">${ui.problem.columns.map(c => `<li>${escHtml(c)}</li>`).join("")}</ul>
+          <strong>${escHtml(ui.problem.headline)}</strong>
+          <div class="form-help">${ui.problem.detail}</div>
+          ${ui.problem.columns.length ? `<ul class="student-dup-list">${ui.problem.columns.map(c => `<li>${escHtml(c)}</li>`).join("")}</ul>` : ""}
+          ${ui.unsure ? `<div style="margin-top:8px"><button type="button" class="btn btn-secondary btn-sm" id="stuRecheck"${dis}>Refresh roster &amp; check</button></div>` : ""}
         </div>
       </div>` : "";
 
     host.innerHTML = `
       <form class="form-card students-quick-form" id="stuFormEl" novalidate>
         <h3>${editing ? "Edit Student" : "Add Student"}</h3>
+        ${rosterBlocked ? `<div class="warning-banner" role="alert"><div><strong>Saving is disabled.</strong> ${escHtml(STUDENT_ROSTER.problemText())} A student can't be added or changed until the whole roster has loaded, because duplicates can't be ruled out.</div></div>` : ""}
         ${problemHtml}
         ${dupHtml}
         <div class="form-field">
@@ -5465,9 +5671,9 @@ const APP = {
         ${editing ? "" : `<p class="form-help">PACE and Daily Pulse start off — turn them on only for students who take part.</p>`}
         <div class="students-form-actions">
           ${editing
-            ? `<button type="submit" class="btn btn-primary" id="stuSave"${dis}>${ui.saving ? "Saving…" : "Save Changes"}</button>`
-            : `<button type="submit" class="btn btn-primary" id="stuSave"${dis}>${ui.saving ? "Saving…" : "Save Student"}</button>
-               <button type="button" class="btn btn-secondary" id="stuSaveAnother"${dis}>Save &amp; Add Another</button>`}
+            ? `<button type="submit" class="btn btn-primary" id="stuSave"${saveDis}>${ui.saving ? "Saving…" : "Save Changes"}</button>`
+            : `<button type="submit" class="btn btn-primary" id="stuSave"${saveDis}>${ui.saving ? "Saving…" : "Save Student"}</button>
+               <button type="button" class="btn btn-secondary" id="stuSaveAnother"${saveDis}>Save &amp; Add Another</button>`}
           <button type="button" class="btn btn-secondary" id="stuCancel"${dis}>Cancel</button>
         </div>
       </form>`;
@@ -5475,6 +5681,7 @@ const APP = {
     document.getElementById("stuFormEl")?.addEventListener("submit", e => { e.preventDefault(); this._saveStudentForm(false); });
     document.getElementById("stuSaveAnother")?.addEventListener("click", () => this._saveStudentForm(true));
     document.getElementById("stuCancel")?.addEventListener("click", () => this._closeStudentForm());
+    document.getElementById("stuRecheck")?.addEventListener("click", () => this._recheckStudentRoster());
     document.getElementById("stuDupConfirm")?.addEventListener("click", () => this._saveStudentForm(!!ui.dup?.andAnother, true));
     document.getElementById("stuDupDismiss")?.addEventListener("click", () => {
       this._readStudentsForm();
@@ -5487,6 +5694,23 @@ const APP = {
     const list = document.getElementById("stuList");
     if (!list) return;
     const ui = this._studentsUi;
+    // Never present a roster that isn't known to be complete as if it were.
+    if (!STUDENT_ROSTER.isComplete() && !STUDENT_ROSTER.loading) {
+      list.innerHTML = `<div class="warning-banner"><div>
+          <strong>${STUDENT_ROSTER.incomplete ? "The student roster is incomplete." : "The student roster could not be refreshed."}</strong><br>
+          ${escHtml(STUDENT_ROSTER.error || "")}<br>
+          <span class="form-help">The list is hidden until the whole roster has loaded. Your changes to SharePoint, if any, were not affected.</span>
+          <div style="margin-top:8px"><button type="button" class="btn btn-secondary btn-sm" id="stuListRetry">Try Again</button></div>
+        </div></div>`;
+      const count = document.getElementById("stuCount");
+      if (count) count.textContent = "";
+      document.getElementById("stuListRetry")?.addEventListener("click", async () => {
+        await STUDENT_ROSTER.refresh();
+        SETUP_DATA.students = STUDENT_ROSTER.getAll();
+        if (this.currentPage === "students") { this._renderStudentsForm(); this._renderStudentsList(); }
+      });
+      return;
+    }
     const all = [...STUDENT_ROSTER.getAll()].sort((a, b) =>
       (a.lastName || a.name).localeCompare(b.lastName || b.name) || (a.firstName || "").localeCompare(b.firstName || ""));
     const q = ui.search.trim().toLowerCase();
@@ -5529,6 +5753,10 @@ const APP = {
   async _saveStudentForm(andAnother, allowDuplicate = false) {
     const ui = this._studentsUi;
     if (ui.saving || !ui.mode) return;
+    if (ui.unsure && ui.unsure.noId && !ui.unsure.checked) {
+      showToast("Press “Refresh roster & check” first — the last save's result is unknown and it will not be retried automatically.", "error");
+      return;
+    }
     const d = this._readStudentsForm() || this._studentsDraftDefaults();
     const editing = ui.mode === "edit";
 
@@ -5539,6 +5767,14 @@ const APP = {
 
     if (!d.first || !d.last) { showToast("Enter the student's first and last name.", "error"); return; }
     if (!d.teacher)          { showToast("Select a teacher.", "error"); return; }
+
+    if (!STUDENT_ROSTER.isComplete()) {
+      showToast(STUDENT_ROSTER.loading
+        ? "The roster is still loading — try again in a moment."
+        : `Nothing was saved: ${STUDENT_ROSTER.problemText() || "the roster is not fully loaded."}`, "error");
+      this._renderStudentsForm();
+      return;
+    }
 
     if (!allowDuplicate) {
       const matches = STUDENT_ROSTER.findDuplicates(d.first, d.last, editing ? ui.editId : null);
@@ -5575,61 +5811,42 @@ const APP = {
     ui.saving = true;
     ui.dup = null;
     ui.problem = null;
+    ui.unsure = null;
     this._renderStudentsForm();
 
-    const yn = v => (v ? "Yes" : "No");
-    let result;
-    try {
-      // Address the name fields to the list's REAL first/last-name columns.
-      const cols = await STUDENT_ROSTER.resolveWriteColumns();
-      const fields = {};
-      if ("first" in logical)             fields[cols.firstName] = logical.first;
-      if ("last" in logical)              fields[cols.lastName]  = logical.last;
-      if ("teacher" in logical)           fields["Teacher"]             = logical.teacher;
-      if ("classroom" in logical)         fields["Classroom"]           = logical.classroom;
-      if ("active" in logical)            fields["Active"]              = yn(logical.active);
-      if ("paceEnabled" in logical)       fields["PACE Enabled"]        = yn(logical.paceEnabled);
-      if ("dailyPulseEnabled" in logical) fields["Daily Pulse Enabled"] = yn(logical.dailyPulseEnabled);
-      // strict: a field with no writable column aborts the save before
-      // anything is written — it is never skipped quietly.
-      if (editing) result = await GRAPH.updateMappedListItem(STUDENT_ROSTER._listName(), ui.editId, fields, { strict: true });
-      else         result = await GRAPH.createMappedListItem(STUDENT_ROSTER._listName(), fields, { strict: true });
-    } catch (err) {
-      ui.saving = false;
-      showToast(`Failed to ${editing ? "update" : "add"} student: ` + (err.message || String(err)), "error");
-      this._renderStudentsForm();
+    // The shared, verified write path (see STUDENT_ROSTER.create/update).
+    const fullName = `${d.first} ${d.last}`;
+    const res = editing ? await STUDENT_ROSTER.update(ui.editId, logical) : await STUDENT_ROSTER.create(logical);
+    SETUP_DATA.students = STUDENT_ROSTER.getAll(); // keep Setup → Students' snapshot current
+    const say = STUDENT_ROSTER.describeResult(res, fullName);
+    ui.saving = false;
+
+    if (res.status !== "verified") {
+      showToast(say.message, "error");
+      if (res.status === "failed") {
+        // Nothing was written: the form stays open with everything typed, and retrying is safe.
+        this._renderStudentsForm();
+        return;
+      }
+      ui.draft = d;
+      // A record exists (or may exist). From here a Save must UPDATE it — never create a second one.
+      if (!editing && res.id) { ui.mode = "edit"; ui.editId = res.id; }
+      if (res.status === "mismatch") {
+        ui.problem = { headline: `SharePoint did not keep: ${res.problems.join(", ")}.`,
+          detail: `${!editing ? "The record was created in SharePoint, but" : "SharePoint accepted the update, but"} the values did not come back when the record was read again, so this was <strong>not</strong> counted as saved.${!editing ? " Saving again updates that same record — it will not create a second one." : ""}`,
+          columns: await this._describeRosterColumns() };
+      } else {
+        const noId = !editing && !res.id;
+        ui.unsure = { noId, checked: false };
+        ui.problem = { headline: res.status === "uncertain" ? "The result of this save is UNKNOWN." : "Saved, but NOT verified.",
+          detail: say.message.replace(/^(NOT VERIFIED|UNCERTAIN): /, "") + (noId ? " Saving is paused until you press <strong>Refresh roster &amp; check</strong>; this page will never retry the creation by itself." : " Saving again updates that same record — it will not create a second one."),
+          columns: [] };
+      }
+      if (this.currentPage === "students") { this._renderStudentsForm(); this._renderStudentsList(); }
       return;
     }
 
-    // ── SharePoint accepted the write ──
-    const fullName = `${d.first} ${d.last}`;
-    const savedId = editing ? ui.editId : String(result?.id ?? "");
-    await STUDENT_ROSTER.refresh();
-    SETUP_DATA.students = STUDENT_ROSTER.getAll(); // keep Setup → Students' snapshot current
-
-    if (STUDENT_ROSTER.error) {
-      showToast(`${editing ? "Update" : "Student"} sent, but the roster could not be re-read to confirm it — reload the page and check.`, "error");
-    } else {
-      // Re-read check: the roster as the rest of the app sees it must now
-      // show what was just saved. This is what catches a column that
-      // accepted the request but doesn't hold (or doesn't read back) the value.
-      const problems = this._studentSaveProblems(savedId, logical);
-      if (problems.length) {
-        ui.saving = false;
-        ui.draft = d;
-        if (!editing && savedId) { ui.mode = "edit"; ui.editId = savedId; } // a retry updates this record — never creates a second one
-        ui.problem = { problems, created: !editing, columns: await this._describeRosterColumns() };
-        showToast(`SharePoint did not keep: ${problems.join(", ")}. Nothing was reported as saved — see the details on the form.`, "error");
-        if (this.currentPage === "students") { this._renderStudentsForm(); this._renderStudentsList(); }
-        return;
-      }
-      if (!editing && !savedId && !STUDENT_ROSTER.getAll().some(s => STUDENT_ROSTER._nameKey(s.name) === STUDENT_ROSTER._nameKey(fullName))) {
-        showToast("Saved to SharePoint, but the new student isn't showing on the roster yet — refresh and verify.", "error");
-      }
-    }
-
-    showToast(editing ? `"${fullName}" updated.` : `Student "${fullName}" added.`);
-    ui.saving = false;
+    showToast(say.message);
     ui.problem = null;
     ui.justAddedKey = editing ? "" : STUDENT_ROSTER._nameKey(fullName);
     if (!editing && andAnother) {
@@ -5645,28 +5862,26 @@ const APP = {
     }
   },
 
-  // Compares the just-saved record, as the roster now reads it back from
-  // SharePoint, with what was sent. Returns human-readable labels of anything
-  // that did not come back — [] means the save is confirmed.
-  _studentSaveProblems(id, logical) {
-    const rec = id ? STUDENT_ROSTER.find(id) : null;
-    if (!rec) return id ? ["the saved student could not be found when the roster was re-read"] : [];
-    const checks = [
-      ["first",             "first name",          rec.firstName],
-      ["last",              "last name",           rec.lastName],
-      ["teacher",           "teacher",             rec.teacherName],
-      ["classroom",         "classroom",           rec.classroom],
-      ["active",            "Active",              rec.active],
-      ["paceEnabled",       "PACE Enabled",        rec.paceEnabled],
-      ["dailyPulseEnabled", "Daily Pulse Enabled", rec.dailyPulseEnabled]
-    ];
-    return checks.filter(([key, , readBack]) => key in logical && logical[key] !== readBack).map(([, label]) => label);
+  // Pressed after an uncertain / id-less create: re-read the roster so the
+  // admin (and the duplicate check) can see whether the student was created.
+  async _recheckStudentRoster() {
+    const ui = this._studentsUi;
+    this._readStudentsForm();
+    await STUDENT_ROSTER.refresh();
+    SETUP_DATA.students = STUDENT_ROSTER.getAll();
+    if (ui.unsure) ui.unsure.checked = true;
+    showToast(STUDENT_ROSTER.error ? "Could not refresh the roster — try again." : "Roster refreshed — check the list for the student before saving.", STUDENT_ROSTER.error ? "error" : "success");
+    if (this.currentPage === "students") { this._renderStudentsForm(); this._renderStudentsList(); }
   },
 
   async _describeRosterColumns() {
     try {
-      const { firstName, lastName, schema } = await STUDENT_ROSTER.resolveWriteColumns();
-      return [`First name: "${firstName}" → column ${schema[firstName]}`, `Last name: "${lastName}" → column ${schema[lastName]}`];
+      const { firstName, lastName } = await STUDENT_ROSTER.resolveWriteColumns();
+      const describe = async (label, display) => {
+        const t = await GRAPH.resolveWriteTarget(STUDENT_ROSTER._listName(), display);
+        return `${label}: "${display}" → ${t.internalName ? `column ${t.internalName}${t.translated ? ` (underlying column of the computed ${t.via})` : ""}` : t.reason}`;
+      };
+      return [await describe("First name", firstName), await describe("Last name", lastName)];
     } catch (err) {
       return [err.message || String(err)];
     }
@@ -5852,6 +6067,17 @@ const APP = {
       .map(u => ({ label: u.name, value: resolveCanonicalTeacherValue(u.name, students) }))
       .sort((a, b) => a.label.localeCompare(b.label));
     const yesNo = ok => ok ? '<span class="badge badge-green">Yes</span>' : '<span class="badge badge-slate">No</span>';
+    // A roster that failed to load completely is not shown, and nothing can be added to it: a partial
+    // list (or a false "No students found") would misrepresent the SharePoint list.
+    if (STUDENT_ROSTER.error) {
+      return `
+        <div class="setup-source-bar"><span class="setup-source-label">Source: ${escHtml(sourceList.toUpperCase())}</span></div>
+        <div class="warning-banner">
+          <div><strong>${STUDENT_ROSTER.incomplete ? "The student roster is incomplete." : "Student roster could not be loaded."}</strong><br>
+          ${escHtml(STUDENT_ROSTER.error)}<br>
+          <span class="form-help">No students are shown, and none can be added or changed here, until the whole roster has loaded. Use “↻ Refresh from SharePoint” above to try again.</span></div>
+        </div>`;
+    }
     return `
       <div class="setup-source-bar">
         <span class="setup-source-label">Source: ${escHtml(sourceList.toUpperCase())}</span>
@@ -6044,50 +6270,35 @@ const APP = {
           showToast("First name, last name, and teacher are required.", "error");
           return;
         }
-        try {
-          requireSetupAdmin();
-          // Writes to the SAME production roster STUDENT_ROSTER reads
-          // (CONFIG.STUDENT_ROSTER_LIST) — no Pilot ID, no combined
-          // "First + Last Initial" name; the production schema has separate
-          // first/last name columns and no student-id column at all.
-          await GRAPH.createMappedListItem(STUDENT_ROSTER._listName(), {
-            "Student First Name":  firstName,
-            "Student Last Name":   lastName,
-            "Teacher":             teacher,
-            "Classroom":           classroom,
-            "Active":              active ? "Yes" : "No",
-            "PACE Enabled":        paceEnabled ? "Yes" : "No",
-            "Daily Pulse Enabled": dailyPulseEnabled ? "Yes" : "No"
-          });
-          showToast(`Student "${firstName} ${lastName}" added.`);
-          await SETUP_DATA.refresh();
-        } catch (err) { showToast("Failed to add student: " + err.message, "error"); }
+        // Same duplicate protection as the Students page: never silently create a second copy.
+        let dupes;
+        try { dupes = STUDENT_ROSTER.findDuplicates(firstName, lastName); }
+        catch (err) { showToast(`Nothing was saved: ${err.message}`, "error"); return; }
+        if (dupes.length && !confirm(`"${firstName} ${lastName}" may already be on the roster (${dupes.map(m => `${m.teacherName || "no teacher"}, ${m.active ? "active" : "inactive"}`).join("; ")}). Add a separate student anyway?`)) return;
+        // Same verified, type-aware write path as the Students page — see
+        // STUDENT_ROSTER.create(). (Blank classroom is simply not sent.)
+        const values = { first: firstName, last: lastName, teacher, active, paceEnabled, dailyPulseEnabled };
+        if (classroom) values.classroom = classroom;
+        const res = await STUDENT_ROSTER.create(values);
+        const say = STUDENT_ROSTER.describeResult(res, `${firstName} ${lastName}`);
+        showToast(say.message, say.ok ? "success" : "error");
+        await SETUP_DATA.refresh();
       });
 
       tc.addEventListener("click", async e => {
         const deactivateBtn = e.target.closest(".deactivate-student-btn");
         const reactivateBtn = e.target.closest(".reactivate-student-btn");
-        if (deactivateBtn) {
-          const { spId, name } = deactivateBtn.dataset;
-          if (!confirm(`Deactivate "${name}"? Their historical records are preserved.`)) return;
-          try {
-            requireSetupAdmin();
-            // PATCHes the existing item by its SharePoint id — never
-            // creates a new record.
-            await GRAPH.updateMappedListItem(STUDENT_ROSTER._listName(), spId, { "Active": "No" });
-            showToast(`"${name}" deactivated.`);
-            await SETUP_DATA.refresh();
-          } catch (err) { showToast("Failed to deactivate: " + err.message, "error"); }
-        }
-        if (reactivateBtn) {
-          const { spId, name } = reactivateBtn.dataset;
-          try {
-            requireSetupAdmin();
-            await GRAPH.updateMappedListItem(STUDENT_ROSTER._listName(), spId, { "Active": "Yes" });
-            showToast(`"${name}" reactivated.`);
-            await SETUP_DATA.refresh();
-          } catch (err) { showToast("Failed to reactivate: " + err.message, "error"); }
-        }
+        const toggle = async (btn, active, confirmText, doneText) => {
+          const { spId, name } = btn.dataset;
+          if (confirmText && !confirm(confirmText(name))) return;
+          // Edits only the Active flag of the existing record, by its id.
+          const res = await STUDENT_ROSTER.update(spId, { active });
+          const say = STUDENT_ROSTER.describeResult(res, name);
+          showToast(say.ok ? doneText(name) : say.message, say.ok ? "success" : "error");
+          await SETUP_DATA.refresh();
+        };
+        if (deactivateBtn) await toggle(deactivateBtn, false, n => `Deactivate "${n}"? Their historical records are preserved.`, n => `"${n}" deactivated.`);
+        if (reactivateBtn) await toggle(reactivateBtn, true, null, n => `"${n}" reactivated.`);
       });
     }
 

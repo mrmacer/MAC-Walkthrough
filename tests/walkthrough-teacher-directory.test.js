@@ -98,6 +98,8 @@ function makeGraphMock() {
   return {
     calls,
     GRAPH: {
+      // The roster is read with the all-pages reader; the mock serves the same rows.
+      async getAllListItems(listName) { return this.getListItems(listName); },
       async getListItems(listName) {
         calls.getListItems.push(listName);
         if (listName === "IEP_Users2") return USERS2_ROWS;

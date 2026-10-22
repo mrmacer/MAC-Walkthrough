@@ -75,30 +75,42 @@ function makeGraph() {
       { id: "s1", sfield_1: "Jane", sfield_2: "Doe",  sfield_3: "Bossons, A", sfield_4: "Room 1", sfield_5: "Yes", sfield_6: "Yes", sfield_7: "No" },
       { id: "s2", sfield_1: "Old",  sfield_2: "Kid",  sfield_3: "Bossons, A", sfield_4: "",       sfield_5: "No",  sfield_6: "No",  sfield_7: "No" }
     ],
-    nextId: 100, calls: { create: [], update: [], rosterReads: 0 },
+    nextId: 100, calls: { create: [], update: [], rosterReads: 0, itemReads: [] },
     createGate: null, createError: null, updateError: null
   };
   const toInternal = fields => Object.fromEntries(Object.entries(fields).map(([k, v]) => [ROSTER_SCHEMA[k], v]));
   return {
     state,
     GRAPH: {
+      // The roster is read with the all-pages reader; the mock serves the same rows.
+      async getAllListItems(listName) { return this.getListItems(listName); },
       async getListItems(listName) {
         if (listName === "IEP_Users2") return USERS2_ROWS;
         if (listName === ROSTER_LIST) { state.calls.rosterReads++; return state.rows.map(r => ({ ...r })); }
         return [];
       },
       async getListSchema(listName) { return listName === ROSTER_LIST ? ROSTER_SCHEMA : {}; },
+      // Real implementation picks the value form from the column's SharePoint type; this suite's roster columns are text.
+      async booleanValueFor(listName, displayName, flag) { return flag ? "Yes" : "No"; },
+      async mapFields(listName, fields) { return fields; },
+      async missingRequiredColumns() { return []; },
+      async getListItem(listName, id) {
+        state.calls.itemReads.push(id);
+        const row = state.rows.find(r => r.id === id);
+        if (!row) throw Object.assign(new Error("Graph 404: item not found"), { graphStatus: 404 });
+        return { ...row };
+      },
       async createMappedListItem(listName, fields) {
         state.calls.create.push({ listName, fields: { ...fields } });
         if (state.createGate) await state.createGate;
-        if (state.createError) throw new Error(state.createError);
+        if (state.createError) throw Object.assign(new Error(state.createError), { graphStatus: 403 });
         const id = String(state.nextId++);
         state.rows.push({ id, ...toInternal(fields) });
         return { id };
       },
       async updateMappedListItem(listName, itemId, fields) {
         state.calls.update.push({ listName, itemId, fields: { ...fields } });
-        if (state.updateError) throw new Error(state.updateError);
+        if (state.updateError) throw Object.assign(new Error(state.updateError), { graphStatus: 403 });
         Object.assign(state.rows.find(r => r.id === itemId), toInternal(fields));
         return {};
       }
@@ -438,10 +450,14 @@ async function editKeepsAFormerTeacherInsteadOfSilentlyReassigning() {
 /* ── 15–20. nothing else changed ─────────────────────────────────────────── */
 
 function setupStudentsAndOtherWorkflowsAreUntouched() {
-  // item 15: Setup → Students still writes through the same existing path.
-  assert.match(app, /await GRAPH\.createMappedListItem\(STUDENT_ROSTER\._listName\(\), \{\s*"Student First Name":\s+firstName,/);
-  assert.match(app, /GRAPH\.updateMappedListItem\(STUDENT_ROSTER\._listName\(\), spId, \{ "Active": "No" \}\)/);
+  // item 15: Setup → Students still exists and now writes through the same shared, verified
+  // roster path as the Students page (STUDENT_ROSTER.create/update → the same GRAPH mapped helpers).
   assert.match(app, /_renderStudentsTab\(\) \{/);
+  const setupTab = app.slice(app.indexOf('if (tab === "students") {'), app.indexOf('if (tab === "data") {'));
+  assert.match(setupTab, /STUDENT_ROSTER\.create\(values\)/);
+  assert.match(setupTab, /STUDENT_ROSTER\.update\(spId, \{ active \}\)/);
+  assert.ok(!/GRAPH\.(create|update)MappedListItem/.test(setupTab), "no second, hand-rolled write path left in Setup");
+  assert.match(app, /GRAPH\.createMappedListItem\(list, fields, \{ strict: true \}\)/, "the shared path writes with the existing mapped helper");
 
   // items 16–17: PACE / Daily Pulse code never references the new page.
   const pulse = app.slice(app.indexOf("renderPulse() {"), app.indexOf("renderPulse() {") + 6000);
