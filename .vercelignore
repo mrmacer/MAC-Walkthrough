@@ -1,0 +1,21 @@
+# Files that must never be published with the MAC Walkthrough site.
+# NOTE: when a .vercelignore exists the Vercel CLI uses it INSTEAD of
+# .gitignore, so the secret/system patterns are repeated here on purpose.
+
+# Secrets and local environment files
+.env*
+
+# Version control, local Vercel link/build output, OS junk
+.git
+.gitignore
+.vercel
+.DS_Store
+
+# Local tooling / AI-assistant settings
+.claude
+
+# Test suites (run locally with `node tests/<file>.test.js`) and their fixtures
+tests
+
+# Internal documentation and planning notes (not part of the running app)
+*.md
