@@ -271,9 +271,9 @@ const STUDENT_ROSTER = {
       teacherName,
       teacherId:         slugifyTeacherId(teacherName),
       classroom:         String(row["Classroom"] || "").trim(),
-      // Fail-safe: a blank/missing PACE Enabled or Daily Pulse Enabled cell
-      // defaults to NOT eligible, unlike Active (which keeps its existing
-      // default-true behavior for compatibility).
+      // paceEnabled / dailyPulseEnabled report what SharePoint holds (blank =
+      // No). They no longer decide who is in PACE or Daily Pulse — every
+      // active student is — and an Edit save turns any No into Yes.
       active:            normalizeRosterBoolean(row["Active"],             true),
       paceEnabled:       normalizeRosterBoolean(row["PACE Enabled"],       false),
       dailyPulseEnabled: normalizeRosterBoolean(row["Daily Pulse Enabled"], false)
@@ -565,48 +565,40 @@ const STUDENT_ROSTER = {
     return this.getActive().filter(s => this._matchesTeacher(s, teacherName));
   },
 
-  // PACE: active + PACE-enabled. Intentionally NOT restricted by teacher —
+  // Every active student is in PACE and Daily Pulse — there is no per-student
+  // opt-in. The "PACE Enabled" / "Daily Pulse Enabled" columns are written
+  // Yes for every student (see NEW_STUDENT_FLAGS) but never filter anyone
+  // out, so an older record still saved as No is not left out.
+
+  // PACE: every active student. Intentionally NOT restricted by teacher —
   // PACE is a shared intervention workflow, not a per-classroom one; a
   // teacher may need to log a visit for a student outside their own
   // classroom. Same result for admin and teacher.
   getPaceEnabled() {
-    return this.getActive().filter(s => s.paceEnabled);
+    return this.getActive();
   },
 
-  // Daily Pulse (administrator view): active + Daily-Pulse-enabled, no
-  // teacher restriction — preserves the existing admin UX of seeing every
-  // eligible student at once.
+  // Daily Pulse (administrator view): every active student, no teacher
+  // restriction.
   getDailyPulseEnabled() {
-    return this.getActive().filter(s => s.dailyPulseEnabled);
+    return this.getActive();
   },
 
-  // Daily Pulse (teacher view): active + Daily-Pulse-enabled + assigned to
-  // this specific teacher.
+  // Daily Pulse (teacher view): every active student assigned to this
+  // specific teacher.
   getDailyPulseForTeacher(teacherName) {
     return this.getDailyPulseEnabled().filter(s => this._matchesTeacher(s, teacherName));
   }
 };
 
-// Students page → "+ Add Student" starting values. Only Active is ON.
-//
-//   Active              ON  — ordinary operational flag; a student being added
-//                             is normally active (same default Setup → Students
-//                             already uses).
-//   PACE Enabled        OFF — an ELIGIBILITY flag by this app's own definition
-//                             (it decides who appears in the PACE student list;
-//                             PACE is a specialized intervention service).
-//                             STUDENT_ROSTER deliberately treats a blank value
-//                             as "not eligible" (fail-safe), so a quick-add
-//                             form must not silently opt a student in.
-//   Daily Pulse Enabled OFF — same reasoning (config.js: "Daily Pulse
-//                             eligibility"); intentionally opt-in per student.
-//
-// The administrator sees all three checkboxes and can change them before
-// saving. To change a default later, edit this one object.
-const QUICK_ADD_STUDENT_DEFAULTS = Object.freeze({
+// Every student is Active, PACE Enabled and Daily Pulse Enabled. Both Add
+// Student forms (Students page and Setup → Students) save exactly these
+// values, and no form shows checkboxes for them. A student leaves the lists
+// only by being deactivated (Setup → Students → Deactivate).
+const NEW_STUDENT_FLAGS = Object.freeze({
   active:            true,
-  paceEnabled:       false,
-  dailyPulseEnabled: false
+  paceEnabled:       true,
+  dailyPulseEnabled: true
 });
 
 /* ── Teacher Directory (live IEP_Users2 — active, Role includes Teacher) ──────── */
@@ -3165,8 +3157,8 @@ const APP = {
 
     if (roster.length === 0) {
       const emptyMsg = user.isAdmin
-        ? "No Daily Pulse-enabled students are currently available."
-        : "No Daily Pulse-enabled students are assigned to you.";
+        ? "No active students are currently available."
+        : "No active students are assigned to you.";
       el.innerHTML = `
         <div class="walk-page-header"><h2 class="walk-page-title">Daily Pulse</h2></div>
         <div class="card"><p class="empty-state-text">${escHtml(emptyMsg)}</p></div>`;
@@ -4392,15 +4384,15 @@ const APP = {
 
     // PACE is intentionally NOT restricted to the signed-in teacher's own
     // classroom — it's a shared intervention workflow, so both admins and
-    // teachers see every active + PACE-enabled student, school-wide.
+    // teachers see every active student, school-wide.
     // Grouping by teacher below is presentation only; it does not remove
-    // any otherwise-eligible student.
+    // any student.
     const paceRoster = STUDENT_ROSTER.getPaceEnabled();
 
     if (paceRoster.length === 0) {
       el.innerHTML = `
         <div class="walk-page-header"><h2 class="walk-page-title">PACE Log</h2></div>
-        <div class="card"><p class="empty-state-text">No PACE-enabled students are currently available.</p></div>`;
+        <div class="card"><p class="empty-state-text">No active students are currently available.</p></div>`;
       return;
     }
 
@@ -5460,7 +5452,7 @@ const APP = {
   },
 
   _studentsDraftDefaults() {
-    return { first: "", last: "", teacher: "", classroom: "", ...QUICK_ADD_STUDENT_DEFAULTS };
+    return { first: "", last: "", teacher: "", classroom: "" };
   },
 
   renderStudents() {
@@ -5539,10 +5531,7 @@ const APP = {
     if (!s) return;
     const ui = this._studentsUi;
     ui.mode = "edit"; ui.editId = id; ui.dup = null; ui.problem = null; ui.unsure = null;
-    ui.draft = {
-      first: s.firstName || "", last: s.lastName || "", teacher: s.teacherName || "", classroom: s.classroom || "",
-      active: s.active, paceEnabled: s.paceEnabled, dailyPulseEnabled: s.dailyPulseEnabled
-    };
+    ui.draft = { first: s.firstName || "", last: s.lastName || "", teacher: s.teacherName || "", classroom: s.classroom || "" };
     this._renderStudentsForm();
     document.getElementById("stuFirst")?.focus?.();
   },
@@ -5576,13 +5565,10 @@ const APP = {
     if (!g("stuFirst")) return ui.draft;
     const clean = v => String(v || "").replace(/\s+/g, " ").trim();
     ui.draft = {
-      first:             clean(g("stuFirst").value),
-      last:              clean(g("stuLast")?.value),
-      teacher:           g("stuTeacher")?.value || "",
-      classroom:         clean(g("stuClassroom")?.value),
-      active:            !!g("stuActive")?.checked,
-      paceEnabled:       !!g("stuPace")?.checked,
-      dailyPulseEnabled: !!g("stuPulse")?.checked
+      first:     clean(g("stuFirst").value),
+      last:      clean(g("stuLast")?.value),
+      teacher:   g("stuTeacher")?.value || "",
+      classroom: clean(g("stuClassroom")?.value)
     };
     return ui.draft;
   },
@@ -5611,7 +5597,7 @@ const APP = {
           <ul class="student-dup-list">
             ${ui.dup.matches.map(m => `<li>${escHtml(m.name)} — ${escHtml(m.teacherName || "no teacher")} · ${m.active ? "Active" : "Inactive"}</li>`).join("")}
           </ul>
-          ${ui.dup.matches.some(m => !m.active) ? `<div class="form-help">An inactive record exists — consider editing it and turning Active back on instead of creating a second one.</div>` : ""}
+          ${ui.dup.matches.some(m => !m.active) ? `<div class="form-help">An inactive record exists — consider reactivating it in Setup → Students instead of creating a second one.</div>` : ""}
           <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
             <button type="button" class="btn btn-secondary btn-sm" id="stuDupConfirm"${dis}>${editing ? "Save anyway" : "Add as a separate student"}</button>
             <button type="button" class="btn btn-secondary btn-sm" id="stuDupDismiss"${dis}>Go back</button>
@@ -5656,19 +5642,6 @@ const APP = {
             <input class="form-input" id="stuClassroom" placeholder="e.g. Room 12" maxlength="80" value="${escHtml(d.classroom)}"${dis}>
           </div>
         </div>
-        <label class="detail-checkbox-row" for="stuActive">
-          <input type="checkbox" id="stuActive"${d.active ? " checked" : ""}${dis}>
-          <span>Active</span>
-        </label>
-        <label class="detail-checkbox-row" for="stuPace">
-          <input type="checkbox" id="stuPace"${d.paceEnabled ? " checked" : ""}${dis}>
-          <span>PACE Enabled</span>
-        </label>
-        <label class="detail-checkbox-row" for="stuPulse">
-          <input type="checkbox" id="stuPulse"${d.dailyPulseEnabled ? " checked" : ""}${dis}>
-          <span>Daily Pulse Enabled</span>
-        </label>
-        ${editing ? "" : `<p class="form-help">PACE and Daily Pulse start off — turn them on only for students who take part.</p>`}
         <div class="students-form-actions">
           ${editing
             ? `<button type="submit" class="btn btn-primary" id="stuSave"${saveDis}>${ui.saving ? "Saving…" : "Save Changes"}</button>`
@@ -5734,9 +5707,7 @@ const APP = {
           ${rows.map(s => `<tr class="${s.active ? "" : "row-inactive"}${ui.justAddedKey && STUDENT_ROSTER._nameKey(s.name) === ui.justAddedKey ? " student-row-new" : ""}" data-student-id="${escHtml(s.id)}">
             <td><strong>${escHtml(s.name)}</strong></td>
             <td class="text-muted">${escHtml(s.teacherName) || "—"}${s.classroom ? ` · ${escHtml(s.classroom)}` : ""}</td>
-            <td>${s.active ? '<span class="badge badge-green">Active</span>' : '<span class="badge badge-slate">Inactive</span>'}
-              ${s.paceEnabled ? '<span class="badge badge-blue">PACE</span>' : ""}
-              ${s.dailyPulseEnabled ? '<span class="badge badge-blue">Pulse</span>' : ""}</td>
+            <td>${s.active ? '<span class="badge badge-green">Active</span>' : '<span class="badge badge-slate">Inactive</span>'}</td>
             <td><button type="button" class="btn btn-secondary btn-sm stu-edit-btn" data-student-id="${escHtml(s.id)}">Edit</button></td>
           </tr>`).join("")}
         </tbody></table></div>
@@ -5796,15 +5767,12 @@ const APP = {
       if (d.last  !== (existing.lastName  || ""))      logical.last = d.last;
       if (d.teacher !== (existing.teacherName || ""))  logical.teacher = d.teacher;
       if (d.classroom !== (existing.classroom || ""))  logical.classroom = d.classroom;
-      if (d.active !== existing.active)                logical.active = d.active;
-      if (d.paceEnabled !== existing.paceEnabled)      logical.paceEnabled = d.paceEnabled;
-      if (d.dailyPulseEnabled !== existing.dailyPulseEnabled) logical.dailyPulseEnabled = d.dailyPulseEnabled;
+      // Every student is PACE + Daily Pulse enabled: an older record still saved as No is fixed on save.
+      if (!existing.paceEnabled)                       logical.paceEnabled = true;
+      if (!existing.dailyPulseEnabled)                 logical.dailyPulseEnabled = true;
       if (!Object.keys(logical).length) { showToast("No changes to save."); this._closeStudentForm(); return; }
     } else {
-      Object.assign(logical, {
-        first: d.first, last: d.last, teacher: d.teacher,
-        active: d.active, paceEnabled: d.paceEnabled, dailyPulseEnabled: d.dailyPulseEnabled
-      });
+      Object.assign(logical, { first: d.first, last: d.last, teacher: d.teacher, ...NEW_STUDENT_FLAGS });
       if (d.classroom) logical.classroom = d.classroom; // a blank classroom is simply not sent
     }
 
@@ -6066,7 +6034,6 @@ const APP = {
       .filter(u => u.active && isTeacherRole(u.role))
       .map(u => ({ label: u.name, value: resolveCanonicalTeacherValue(u.name, students) }))
       .sort((a, b) => a.label.localeCompare(b.label));
-    const yesNo = ok => ok ? '<span class="badge badge-green">Yes</span>' : '<span class="badge badge-slate">No</span>';
     // A roster that failed to load completely is not shown, and nothing can be added to it: a partial
     // list (or a false "No students found") would misrepresent the SharePoint list.
     if (STUDENT_ROSTER.error) {
@@ -6110,32 +6077,18 @@ const APP = {
             <input class="form-input" id="newStudentClassroom" placeholder="e.g. Room 12" maxlength="80">
           </div>
         </div>
-        <label class="detail-checkbox-row" for="newStudentActive">
-          <input type="checkbox" id="newStudentActive" checked>
-          <span>Active</span>
-        </label>
-        <label class="detail-checkbox-row" for="newStudentPace">
-          <input type="checkbox" id="newStudentPace">
-          <span>PACE Enabled</span>
-        </label>
-        <label class="detail-checkbox-row" for="newStudentPulse">
-          <input type="checkbox" id="newStudentPulse">
-          <span>Daily Pulse Enabled</span>
-        </label>
-        <button class="btn btn-primary" id="addStudentBtn" style="margin-top:8px">Add Student</button>
+        <button class="btn btn-primary" id="addStudentBtn" style="margin-top:16px">Add Student</button>
       </div>
       <div class="card">
         <div class="card-title">Students (${students.length})</div>
         ${students.length === 0
           ? `<div class="empty-state"><div class="empty-icon">🪪</div><p>No students found in ${escHtml(sourceList)}.</p></div>`
-          : `<div class="table-wrap"><table><thead><tr><th>Student</th><th>Teacher</th><th>Classroom</th><th>Active</th><th>PACE</th><th>Daily Pulse</th><th></th></tr></thead><tbody>
+          : `<div class="table-wrap"><table><thead><tr><th>Student</th><th>Teacher</th><th>Classroom</th><th>Active</th><th></th></tr></thead><tbody>
               ${students.map(s => `<tr class="${s.active ? "" : "row-inactive"}">
                 <td><strong>${escHtml(s.name)}</strong></td>
                 <td class="text-muted">${escHtml(s.teacherName) || "—"}</td>
                 <td class="text-muted">${escHtml(s.classroom) || "—"}</td>
                 <td>${s.active ? '<span class="badge badge-green">Active</span>' : '<span class="badge badge-slate">Inactive</span>'}</td>
-                <td>${yesNo(s.paceEnabled)}</td>
-                <td>${yesNo(s.dailyPulseEnabled)}</td>
                 <td>${s.active
                   ? `<button class="btn btn-danger btn-sm deactivate-student-btn" data-sp-id="${escHtml(s.id)}" data-name="${escHtml(s.name)}">Deactivate</button>`
                   : `<button class="btn btn-secondary btn-sm reactivate-student-btn" data-sp-id="${escHtml(s.id)}" data-name="${escHtml(s.name)}">Reactivate</button>`}
@@ -6263,9 +6216,6 @@ const APP = {
         const lastName  = document.getElementById("newStudentLastName").value.trim();
         const teacher   = document.getElementById("newStudentTeacher").value;
         const classroom = document.getElementById("newStudentClassroom").value.trim();
-        const active            = document.getElementById("newStudentActive").checked;
-        const paceEnabled       = document.getElementById("newStudentPace").checked;
-        const dailyPulseEnabled = document.getElementById("newStudentPulse").checked;
         if (!firstName || !lastName || !teacher) {
           showToast("First name, last name, and teacher are required.", "error");
           return;
@@ -6275,9 +6225,9 @@ const APP = {
         try { dupes = STUDENT_ROSTER.findDuplicates(firstName, lastName); }
         catch (err) { showToast(`Nothing was saved: ${err.message}`, "error"); return; }
         if (dupes.length && !confirm(`"${firstName} ${lastName}" may already be on the roster (${dupes.map(m => `${m.teacherName || "no teacher"}, ${m.active ? "active" : "inactive"}`).join("; ")}). Add a separate student anyway?`)) return;
-        // Same verified, type-aware write path as the Students page — see
-        // STUDENT_ROSTER.create(). (Blank classroom is simply not sent.)
-        const values = { first: firstName, last: lastName, teacher, active, paceEnabled, dailyPulseEnabled };
+        // Same verified, type-aware write path and same NEW_STUDENT_FLAGS (all three
+        // on) as the Students page — see STUDENT_ROSTER.create(). (Blank classroom is simply not sent.)
+        const values = { first: firstName, last: lastName, teacher, ...NEW_STUDENT_FLAGS };
         if (classroom) values.classroom = classroom;
         const res = await STUDENT_ROSTER.create(values);
         const say = STUDENT_ROSTER.describeResult(res, `${firstName} ${lastName}`);
